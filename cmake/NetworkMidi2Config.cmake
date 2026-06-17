@@ -44,6 +44,11 @@ elseif(DEFINED PICO_BOARD)
     else()
         set(_NM2_LIB_DIR "${_NM2_ROOT}/lib/pico/rp2040")
     endif()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "cortex-m33"
+       OR CMAKE_SYSTEM_PROCESSOR MATCHES "MCXN"
+       OR (DEFINED MCUX_SDK_PATH AND CMAKE_CROSSCOMPILING))
+    # NXP MCUXpresso SDK target (FRDM-MCXN947 or compatible Cortex-M33 board)
+    set(_NM2_LIB_DIR "${_NM2_ROOT}/lib/nxp/mcxn947")
 else()
     message(WARNING "NetworkMidi2: unrecognised platform — "
             "set NM2_LIB_DIR manually if needed.")
@@ -86,6 +91,22 @@ if(EXISTS "${_NM2_LIB_DIR}/libnm2_transport_lwip.a")
             INTERFACE_INCLUDE_DIRECTORIES
                 "${_NM2_ROOT}/transports/lwip;${_NM2_ROOT}/include"
             INTERFACE_LINK_LIBRARIES "NetworkMidi2::networkmidi2"
+        )
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# NXP MCUXpresso SDK transport (FRDM-MCXN947 / Cortex-M33 + lwIP + FreeRTOS)
+# ---------------------------------------------------------------------------
+if(EXISTS "${_NM2_LIB_DIR}/libnm2_transport_nxp.a")
+    if(NOT TARGET NetworkMidi2::nm2_transport_nxp)
+        add_library(NetworkMidi2::nm2_transport_nxp STATIC IMPORTED GLOBAL)
+        set_target_properties(NetworkMidi2::nm2_transport_nxp PROPERTIES
+            IMPORTED_LOCATION "${_NM2_LIB_DIR}/libnm2_transport_nxp.a"
+            INTERFACE_INCLUDE_DIRECTORIES
+                "${_NM2_ROOT}/transports/nxp;${_NM2_ROOT}/include"
+            INTERFACE_LINK_LIBRARIES "NetworkMidi2::networkmidi2"
+            INTERFACE_COMPILE_DEFINITIONS "NM2_HAVE_LWIP_MDNS=1"
         )
     endif()
 endif()

@@ -8,12 +8,13 @@ for embedded and desktop platforms. Developed by [AmeNote Inc.](https://amenote.
 | Item | Location |
 |---|---|
 | Public header files | `include/networkmidi2/` |
-| Transport headers | `transports/{posix,lwip,freertos_plus_tcp}/` |
+| Transport headers | `transports/{posix,lwip,freertos_plus_tcp,nxp}/` |
 | Pre-built static libraries | `lib/<platform>/` |
 | Pre-compiled example binaries | `bin/<platform>/` |
 | Example source code | `examples/midi_bridge/` |
 | CMake `find_package()` support | `cmake/NetworkMidi2Config.cmake` |
 | Linux cross-compile toolchains | `cmake/toolchain-linux-*.cmake` |
+| NXP toolchain file | `cmake/toolchain-nxp-mcxn947.cmake` |
 | Pico SDK import helper | `cmake/pico_sdk_import.cmake` |
 | Integration guide | `docs/INTEGRATION.md` |
 | Porting guide | `docs/PORTING.md` |
@@ -122,6 +123,65 @@ while (true) {
 
 ---
 
+## Quick Start — NXP FRDM-MCXN947 (FreeRTOS + lwIP)
+
+### CMake setup
+
+```cmake
+list(APPEND CMAKE_PREFIX_PATH "/path/to/networkmidi2")
+find_package(NetworkMidi2 REQUIRED)
+
+# NXP SDK and FreeRTOS must already be initialised in your CMake project
+target_link_libraries(my_target PRIVATE
+    NetworkMidi2::nm2_transport_nxp
+)
+```
+
+### Usage
+
+```cpp
+#include <networkmidi2/NetworkMidiSession.h>
+#include <NxpUdpTransport.h>
+using namespace networkmidi2;
+
+NxpUdpTransport transport;
+
+EndpointInfo info;
+info.setName("NXP MIDI Client");
+info.setProductId("com.example.nxp-client");
+
+NetworkMidiSession::Callbacks cb;
+cb.onUmp = [](void*, const uint32_t* words, size_t count) { /* ... */ };
+
+NetworkMidiSession session(transport, info, cb);
+UdpEndpoint host{ hostIpv4, 5004 };  // host byte order
+session.beginClient(host, 5005);
+
+// In a FreeRTOS task:
+while (true) {
+    session.tick();
+    vTaskDelay(pdMS_TO_TICKS(1));   // 1 ms
+}
+```
+
+**C++ global constructors:** The NXP SDK startup `.c` file gates
+`__libc_init_array()` on `__cplusplus` (false in C TUs). Call it explicitly:
+
+```cpp
+extern "C" void __libc_init_array(void);
+extern "C" void _init(void) {}
+extern "C" void *__dso_handle __attribute__((weak)) = nullptr;
+
+int main(void) {
+    __libc_init_array();   // run C++ global constructors
+    // ...
+}
+```
+
+See `docs/INTEGRATION.md` for full details.
+
+---
+
 ## Sending MIDI
 
 ```cpp
@@ -185,6 +245,7 @@ session.beginClient(hostEp, 5005, &auth);
 | Pico W (RP2040) | `nm2_transport_lwip` | `lib/pico/rp2040/` |
 | Pico 2 W (RP2350, bare-metal) | `nm2_transport_lwip` | `lib/pico/rp2350/` |
 | Pico 2 W (RP2350, FreeRTOS) | `nm2_transport_lwip` | `lib/pico/rp2350-rtos/` |
+| NXP FRDM-MCXN947 (Cortex-M33) | `nm2_transport_nxp` | `lib/nxp/mcxn947/` |
 
 Linux binaries are fully statically linked (musl libc) — no runtime
 dependencies on the target system.
@@ -204,6 +265,7 @@ Ready-to-run example binaries are in `bin/<platform>/`:
 | `nm2_interactive` | Interactive POSIX session with keyboard MIDI input |
 | `nm2_pico.uf2` | Pico lwIP example — flash via BOOTSEL |
 | `nm2_pico_rtos.uf2` | Pico 2 W FreeRTOS example — flash via BOOTSEL |
+| `nm2_nxp_mcxn947` | NXP FRDM-MCXN947 FreeRTOS example — flash via pyocd (ELF) |
 
 Example source code is in `examples/midi_bridge/` and can be built from
 scratch using the included CMakeLists.txt files against the pre-built libs.

@@ -10,6 +10,7 @@ Pre-built transports included in this release:
 |---|---|---|
 | `transports/posix/PosixUdpTransport.h` | BSD sockets | macOS, Linux |
 | `transports/lwip/LwipUdpTransport.h` | lwIP raw API | Pico, embedded |
+| `transports/nxp/NxpUdpTransport.h` | lwIP + FreeRTOS (ENET_QOS) | NXP FRDM-MCXN947 |
 
 Transport headers for FreeRTOS-Plus-TCP are in
 `transports/freertos_plus_tcp/` for reference; no pre-built binary is
@@ -222,6 +223,20 @@ size_t MyTransport::receive(networkmidi2::UdpEndpoint& from,
 In FreeRTOS, protect `rxHead_` updates with `taskENTER_CRITICAL()` /
 `taskEXIT_CRITICAL()` if the callback runs from a task context, or use
 a `QueueHandle_t`.
+
+**lwIP `NO_SYS=0` with `LWIP_TCPIP_CORE_LOCKING=1` (NXP ENET_QOS):**
+When lwIP runs its own TCP/IP thread (as on the NXP FRDM-MCXN947), any call
+into the lwIP raw API from outside that thread must hold the core lock:
+
+```cpp
+LOCK_TCPIP_CORE();
+udp_sendto(pcb_, pbuf, &dest, port);
+UNLOCK_TCPIP_CORE();
+```
+
+The `udp_recv` callback fires on the TCP/IP thread — do not take the core
+lock inside it. Use the ring buffer above to hand datagrams to the session
+task without holding the lock.
 
 ---
 

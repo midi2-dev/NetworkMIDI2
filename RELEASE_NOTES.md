@@ -1,5 +1,13 @@
 # NetworkMIDI2 Release Notes
 
+## v0.2.0 — June 2026
+
+Adds NXP FRDM-MCXN947 (Cortex-M33, ENET_QOS, FreeRTOS + lwIP) support.
+End-to-end verified: NXP as CLIENT, Mac POSIX as HOST — session reaches
+`Established`, UMP MIDI 2.0 notes exchanged, FEC TX/RX dropped: 0.
+
+---
+
 ## v0.1.1 — June 2026
 
 Initial public binary release of the AmeNote NetworkMIDI2 library.
@@ -59,6 +67,7 @@ Initial public binary release of the AmeNote NetworkMIDI2 library.
 |---|---|---|
 | POSIX BSD sockets | `transports/posix/PosixUdpTransport.h` | macOS, Linux |
 | lwIP raw API | `transports/lwip/LwipUdpTransport.h` | Pico W, Pico 2 W |
+| NXP ENET_QOS + FreeRTOS + lwIP | `transports/nxp/NxpUdpTransport.h` | NXP FRDM-MCXN947 |
 | FreeRTOS-Plus-TCP (headers only) | `transports/freertos_plus_tcp/` | FreeRTOS |
 
 The FreeRTOS-Plus-TCP transport is provided as headers for reference. No
@@ -81,6 +90,7 @@ Pre-built static libraries are provided in `lib/<platform>/`:
 | Pico W — RP2040 | `lib/pico/rp2040/` | Bare-metal lwIP |
 | Pico 2 W — RP2350 | `lib/pico/rp2350/` | Bare-metal lwIP |
 | Pico 2 W — RP2350 + FreeRTOS | `lib/pico/rp2350-rtos/` | FreeRTOS 11.1.0, threadsafe_background lwIP |
+| NXP FRDM-MCXN947 (Cortex-M33) | `lib/nxp/mcxn947/` | FreeRTOS + lwIP (NO_SYS=0, ENET_QOS) |
 
 Linux libraries are compiled with musl libc (`-static`) and carry no
 glibc or shared-library dependencies. They run on any Linux distribution.
@@ -111,6 +121,21 @@ Defaults: port 5004, no authentication, no mDNS. Both `--advertise` and
 `--discover` require mDNS support on the host OS (Bonjour on macOS, Avahi
 on Linux — not available in the static Linux binaries).
 
+### NXP Example (`bin/nxp/mcxn947/`, source: `examples/midi_bridge/nxp/`)
+
+| Binary | Description |
+|---|---|
+| `nm2_nxp_mcxn947` | FRDM-MCXN947 FreeRTOS example — interactive CLI, DHCP, mDNS, MIDI bridge |
+
+Flash with pyocd:
+```bash
+pyocd flash --target mcxn947 --format elf bin/nxp/mcxn947/nm2_nxp_mcxn947
+```
+
+Connect to the MCU-Link virtual COM port (LPUART4, 115200 baud). The board
+prompts for mDNS name, role, and optional authentication passphrase. mDNS
+auto-discovers POSIX peers on the same LAN; a numbered selection list is shown.
+
 ### Pico Examples (`bin/pico/`, source: `examples/midi_bridge/lwip/` and `freertos/`)
 
 | Binary | Description |
@@ -130,6 +155,16 @@ the FEC retransmit path.
 
 The example CMakeLists.txt files build against the pre-built libs in this
 distribution — no NetworkMIDI2 source is required.
+
+**NXP FRDM-MCXN947:**
+```bash
+cmake -B build_nxp \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-nxp-mcxn947.cmake \
+      -DMCUX_SDK_PATH=/path/to/sdk \
+      examples/midi_bridge/nxp
+cmake --build build_nxp
+pyocd flash --target mcxn947 --format elf build_nxp/nm2_nxp_mcxn947
+```
 
 **POSIX (macOS arm64):**
 ```bash

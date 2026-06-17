@@ -167,6 +167,32 @@ you see both halves of the bidirectional exchange in each log.
 | `common/MidiBridgeApp.h/.cpp`    | Event loop, callbacks, UMP printer (used by scripted pair)     |
 | `common/DemoMidiSource.h/.cpp`   | Non-blocking pentatonic MIDI note generator                    |
 | `lwip/main.cpp`                  | Pico 2 W interactive example (CYW43 WiFi + lwIP polling mode)  |
+| `nxp/main.cpp`                   | NXP FRDM-MCXN947 entry point — FreeRTOS task setup, board init |
+| `nxp/SessionTask.cpp`            | NXP session task — DHCP wait, CLI, mDNS, MIDI bridge           |
+| `nxp/board_init.cpp`             | Clock, pin-mux, and ENET_QOS peripheral initialisation          |
+
+---
+
+## NXP FRDM-MCXN947 — FreeRTOS + lwIP
+
+Build and flash the NXP example:
+
+```sh
+cmake -B build_nxp \
+    -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-nxp-mcxn947.cmake \
+    -DMCUX_SDK_PATH=/path/to/sdk \
+    examples/midi_bridge/nxp
+cmake --build build_nxp
+pyocd flash --target mcxn947 --format elf build_nxp/nm2_nxp_mcxn947
+```
+
+Connect to the MCU-Link virtual COM port (LPUART4, 115200 baud).  Follow the
+role → session prompts.  DHCP is used automatically; the board prints its IP
+after acquiring a lease.  mDNS auto-discovers POSIX peers on the same LAN; a
+numbered selection list is shown and manual IP entry is always available.
+
+**Verified:** NXP as CLIENT, Mac POSIX as HOST — session reaches `Established`,
+UMP MIDI 2.0 notes exchanged, FEC TX/RX dropped: 0.
 
 ---
 

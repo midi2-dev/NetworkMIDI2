@@ -29,6 +29,7 @@ Available CMake targets:
 | `NetworkMidi2::networkmidi2` | Core library only — bring your own transport |
 | `NetworkMidi2::nm2_transport_posix` | macOS / Linux desktop (BSD sockets + mDNS) |
 | `NetworkMidi2::nm2_transport_lwip` | Pico / embedded lwIP (bare-metal or FreeRTOS) |
+| `NetworkMidi2::nm2_transport_nxp` | NXP FRDM-MCXN947 (FreeRTOS + lwIP, ENET_QOS) |
 
 Each transport target automatically pulls in `NetworkMidi2::networkmidi2`
 via its `INTERFACE_LINK_LIBRARIES`.
@@ -58,6 +59,7 @@ via its `INTERFACE_LINK_LIBRARIES`.
 // Choose the transport for your platform:
 #include <PosixUdpTransport.h>    // macOS / Linux
 #include <LwipUdpTransport.h>     // Pico / lwIP
+#include <NxpUdpTransport.h>      // NXP FRDM-MCXN947 (FreeRTOS + lwIP)
 ```
 
 All public symbols live in the `networkmidi2` namespace.
@@ -388,6 +390,29 @@ without knowing the host IP address.
 - Use `pico_cyw43_arch_lwip_poll` and call `cyw43_arch_poll()` in your
   main loop alongside `session.tick()`.
 - `lwipopts.h` must appear first on the compiler include path.
+
+### NXP FRDM-MCXN947 (`lib/nxp/mcxn947/`)
+
+- Uses `NO_SYS=0` with `LWIP_TCPIP_CORE_LOCKING=1`. The lwIP TCP/IP thread
+  runs independently; `NxpUdpTransport` uses the same callback ring-buffer
+  pattern as `LwipUdpTransport` so `receive()` is non-blocking.
+- Call `tick()` from a dedicated FreeRTOS task at 1 ms intervals
+  (`vTaskDelay(pdMS_TO_TICKS(1))`).
+- All lwIP raw-API calls inside `NxpUdpTransport` and `NxpMdnsDiscovery` are
+  guarded with `LOCK_TCPIP_CORE()` / `UNLOCK_TCPIP_CORE()` — the session task
+  needs no explicit locking.
+- **C++ global constructors:** The NXP SDK startup `.c` file gates
+  `__libc_init_array()` on `__cplusplus` (false in C translation units). Call
+  it explicitly at the top of `main()`:
+  ```cpp
+  extern "C" void __libc_init_array(void);
+  extern "C" void _init(void) {}
+  extern "C" void *__dso_handle __attribute__((weak)) = nullptr;
+  int main(void) { __libc_init_array(); ... }
+  ```
+  Without this call, virtual dispatch crashes on the first vtable lookup.
+- Flash via `pyocd flash --target mcxn947 --format elf <elf-path>`.
+- Console: MCU-Link virtual COM port, LPUART4, 115200 baud.
 
 ### Pico W — RP2040 (`lib/pico/rp2040/`)
 

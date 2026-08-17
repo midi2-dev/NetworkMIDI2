@@ -1,5 +1,26 @@
 # NetworkMIDI2 Release Notes
 
+## v0.2.1 — August 2026
+
+Fixes a Host session being unable to accept a new client after the first
+one closes: `PendingBye -> Idle` teardown was closing the UDP transport
+without reopening it for Host role, so the session state reported `Idle`
+("ready for a new invitation") while nothing was actually listening. Also
+fixes `lastActivityMs` being incorrectly reset on local sends rather than
+only on received data, which could mask a peer that silently disappeared
+for as long as the local side kept transmitting.
+
+Found and fixed while bringing up AmeNote's ProtoZOA NetworkMIDI2 bridge
+(RP2040 + W5500, lwIP transport); confirmed end-to-end on that hardware
+and via the POSIX desktop examples. All existing unit tests still pass.
+
+Rebuilt for this release: `macos/arm64`, `macos/x86_64`, `pico/rp2040`
+(libraries only — no bare-wired-RP2040 example exists in this repo to
+produce a `.uf2` for). `linux/*`, `pico/rp2350`, `pico/rp2350-rtos`, and
+`nxp/mcxn947` binaries are unchanged from v0.2.0.
+
+---
+
 ## v0.2.0 — June 2026
 
 Adds NXP FRDM-MCXN947 (Cortex-M33, ENET_QOS, FreeRTOS + lwIP) support.

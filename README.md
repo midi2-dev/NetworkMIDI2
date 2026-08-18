@@ -286,7 +286,7 @@ See `RELEASE_NOTES.md` for build instructions.
 This library is free for **educational, evaluation, and non-commercial
 development and testing** use.
 
-**Commercial use requires a license from AmeNote Inc.**
+**Source Code and a Commercial License i available from AmeNote Inc. Please inquire**
 
 Visit [amenote.com](https://amenote.com) to obtain a commercial license.  
 See [LICENSE](LICENSE) for full terms.

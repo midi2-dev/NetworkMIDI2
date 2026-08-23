@@ -1,5 +1,22 @@
 # NetworkMIDI2 Release Notes
 
+## v0.2.2 — August 2026
+
+**POSIX binary release — DNS-SD ABI mismatch fix (macOS/Linux).** The exported
+`NetworkMidi2Config.cmake` did not propagate `NM2_HAVE_DNS_SD` to consumers of
+the prebuilt `libnm2_transport_posix.a`, so `PosixMdnsDiscovery` was built as
+an ~8-byte stub in consumer code while the linked constructor/destructor
+operated on the real ~2 KB DNS-SD layout. This corrupted the stack the
+instant a `PosixMdnsDiscovery` was constructed — a `SIGSEGV` immediately on
+startup in `nm2_host` / `nm2_client` / `nm2_interactive`, even with no
+`--advertise`/`--discover` flags. Fixed and verified on macOS arm64 and
+x86_64. Found while bringing up ProtoZOA's NetworkMIDI2_Bridge integration.
+
+Rebuilt for this release: `macos/arm64`, `macos/x86_64` (libraries and
+examples). All other platform binaries are unchanged from v0.2.1.
+
+---
+
 ## v0.2.1 — August 2026
 
 Fixes a Host session being unable to accept a new client after the first

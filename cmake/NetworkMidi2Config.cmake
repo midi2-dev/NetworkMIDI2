@@ -77,6 +77,30 @@ if(EXISTS "${_NM2_LIB_DIR}/libnm2_transport_posix.a")
                 "${_NM2_ROOT}/transports/posix;${_NM2_ROOT}/include"
             INTERFACE_LINK_LIBRARIES "NetworkMidi2::networkmidi2"
         )
+
+        # NM2_HAVE_DNS_SD must match exactly what libnm2_transport_posix.a was
+        # built with: PosixMdnsDiscovery's data members are entirely inside
+        # #ifdef NM2_HAVE_DNS_SD in the header, so a mismatch here makes the
+        # consumer's view of the class an empty stub while the prebuilt
+        # constructor/destructor still touch the full DNS-SD layout — a stack
+        # buffer overflow the moment a PosixMdnsDiscovery is constructed.
+        # This must mirror the root CMakeLists.txt logic used to build the .a.
+        if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+            set_property(TARGET NetworkMidi2::nm2_transport_posix APPEND PROPERTY
+                INTERFACE_COMPILE_DEFINITIONS "NM2_HAVE_DNS_SD=1")
+        elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            include(CheckIncludeFileCXX)
+            check_include_file_cxx("dns_sd.h" _NM2_DNS_SD_H)
+            if(_NM2_DNS_SD_H)
+                find_library(_NM2_DNS_SD_LIB dns_sd)
+                if(_NM2_DNS_SD_LIB)
+                    set_property(TARGET NetworkMidi2::nm2_transport_posix APPEND PROPERTY
+                        INTERFACE_COMPILE_DEFINITIONS "NM2_HAVE_DNS_SD=1")
+                    set_property(TARGET NetworkMidi2::nm2_transport_posix APPEND PROPERTY
+                        INTERFACE_LINK_LIBRARIES "${_NM2_DNS_SD_LIB}")
+                endif()
+            endif()
+        endif()
     endif()
 endif()
 

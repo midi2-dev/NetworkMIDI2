@@ -1,5 +1,33 @@
 # NetworkMIDI2 Release Notes
 
+## v0.2.3 — August 2026
+
+**lwIP mDNS — `browse()` fails fast before the netif has a real IP.**
+`mdns_search_service()` sends its PTR query synchronously, exactly once, via
+`udp_sendto_if()`, which uses `netif_ip4_addr(netif)` as the packet's source
+address with no check for `0.0.0.0` — so calling `browse()` before
+DHCP/static IP configuration completes silently sent one query with a bogus
+all-zero source address that real mDNS responders discard, and (since lwIP's
+mDNS search has no retry) never found anything for the rest of the search
+window. `LwipMdnsDiscovery::browse()` now returns `false` immediately if
+`netif_default` has no IPv4 address yet, and a new
+`static bool LwipMdnsDiscovery::isNetifReady()` lets the caller distinguish
+"not ready yet, try again shortly" from other `browse()` failures. Also
+clarified `LwipMdnsDiscovery.h`'s docs, which previously said "advertise
+only (no browse)" despite browse() being fully implemented, and didn't
+mention its `netif_default` precondition.
+
+Found while bringing up ProtoZOA's NetworkMIDI2_Bridge integration on a
+custom wired (W5500) lwIP port — this gap was invisible on the Pico W/cyw43
+reference port, where `pico_cyw43_arch` only lets the app proceed once WiFi
+already has an IP.
+
+Rebuilt for this release: `pico/rp2040`, `pico/rp2350`, `pico/rp2350-rtos`
+(libraries only — header/source change in `transports/lwip`, no binary
+change needed on other platforms).
+
+---
+
 ## v0.2.2 — August 2026
 
 **POSIX binary release — DNS-SD ABI mismatch fix (macOS/Linux).** The exported
@@ -12,29 +40,17 @@ startup in `nm2_host` / `nm2_client` / `nm2_interactive`, even with no
 `--advertise`/`--discover` flags. Fixed and verified on macOS arm64 and
 x86_64. Found while bringing up ProtoZOA's NetworkMIDI2_Bridge integration.
 
-Rebuilt for this release: `macos/arm64`, `macos/x86_64` (libraries and
-examples). All other platform binaries are unchanged from v0.2.1.
-
 ---
 
 ## v0.2.1 — August 2026
 
-Fixes a Host session being unable to accept a new client after the first
-one closes: `PendingBye -> Idle` teardown was closing the UDP transport
-without reopening it for Host role, so the session state reported `Idle`
-("ready for a new invitation") while nothing was actually listening. Also
-fixes `lastActivityMs` being incorrectly reset on local sends rather than
-only on received data, which could mask a peer that silently disappeared
-for as long as the local side kept transmitting.
-
-Found and fixed while bringing up AmeNote's ProtoZOA NetworkMIDI2 bridge
-(RP2040 + W5500, lwIP transport); confirmed end-to-end on that hardware
-and via the POSIX desktop examples. All existing unit tests still pass.
-
-Rebuilt for this release: `macos/arm64`, `macos/x86_64`, `pico/rp2040`
-(libraries only — no bare-wired-RP2040 example exists in this repo to
-produce a `.uf2` for). `linux/*`, `pico/rp2350`, `pico/rp2350-rtos`, and
-`nxp/mcxn947` binaries are unchanged from v0.2.0.
+**Host session reopen fix.** After a Host's first session closed, the
+`PendingBye → Idle` forced-teardown path closed the UDP transport without
+reopening it, so no subsequent client could ever connect again even though
+the state correctly reported `Idle`. Also fixed the TX-FIFO drain in
+`tick()` incorrectly resetting the inactivity timer on send instead of
+receive, which could mask a silently-disconnected peer. Found while bringing
+up ProtoZOA's NetworkMIDI2_Bridge integration.
 
 ---
 

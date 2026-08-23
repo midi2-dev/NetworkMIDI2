@@ -41,9 +41,18 @@ struct mdns_answer;
 namespace networkmidi2 {
 
 /**
- * @brief lwIP mDNS responder — advertise only (no browse).
+ * @brief lwIP mDNS responder + searcher (advertise and browse).
  *
- * Call advertise() after WiFi is connected and netif_default is valid.
+ * Call advertise() or browse() only after the link is up and netif_default
+ * points at the active interface — on a custom (non-cyw43) lwIP port this
+ * means netif_set_default() must be called explicitly after netif_add(),
+ * the same as any other wired lwIP port in this codebase (see
+ * examples/midi_bridge/nxp/board_init.cpp). Both advertise() and browse()
+ * operate on netif_default, not an explicit netif parameter; browse() also
+ * performs the IGMP join for 224.0.0.251 via mdns_resp_add_netif(), so it
+ * will silently fail to receive any response if netif_default is stale,
+ * null, or not the interface packets actually arrive on.
+ *
  * The mDNS subsystem is initialised on first call and torn down by
  * unadvertise().
  */
@@ -55,6 +64,14 @@ public:
     bool browse()                          override;
     void stopBrowse()                      override;
     bool nextDiscovered(DiscoveredPeer &)  override;
+
+    /** True once netif_default has a valid IPv4 address, i.e. browse() (and
+     *  advertise()) can be expected to actually reach the network instead of
+     *  failing fast. Call this before browse() to distinguish "not ready
+     *  yet, try again shortly" (e.g. DHCP still in progress) from a browse()
+     *  == false caused by something else. Always false when
+     *  NM2_HAVE_LWIP_MDNS is not defined. */
+    static bool isNetifReady();
 
 #ifdef NM2_HAVE_LWIP_MDNS
 private:

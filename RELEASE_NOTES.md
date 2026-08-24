@@ -1,5 +1,24 @@
 # NetworkMIDI2 Release Notes
 
+## v0.2.4 — August 2026
+
+**Catch-up rebuild — Linux (x86_64/aarch64/armhf) and NXP FRDM-MCXN947
+libraries were stale.** `linux/*` libraries had not been rebuilt since
+v0.1.1 (June 2026) and `nxp/mcxn947` since v0.2.0 (June 2026), so both were
+missing the Host session-reopen fix from v0.2.1 (`src/NetworkMidiSession.cpp`
+is the shared core session implementation used by every transport, not
+transport-specific) — a Host on either platform could not accept a second
+client after the first session closed. No source changes in this release;
+libraries and example binaries were rebuilt from the current `master` (as of
+v0.2.3) and unit tests (`test_session`, `test_protocol`, `test_sha256` — 151
+cases) re-verified passing.
+
+Rebuilt for this release: `linux/x86_64`, `linux/aarch64`, `linux/armhf`,
+`nxp/mcxn947` (libraries and examples). `macos/*` and `pico/*` are unchanged
+from v0.2.2/v0.2.3, already current.
+
+---
+
 ## v0.2.3 — August 2026
 
 **lwIP mDNS — `browse()` fails fast before the netif has a real IP.**

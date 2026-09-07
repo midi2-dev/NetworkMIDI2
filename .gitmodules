@@ -8,3 +8,6 @@
 [submodule "third_party/tinyusb"]
 	path = third_party/tinyusb
 	url = https://github.com/hathach/tinyusb.git
+[submodule "third_party/ioLibrary_Driver"]
+	path = third_party/ioLibrary_Driver
+	url = https://github.com/Wiznet/ioLibrary_Driver.git

@@ -329,17 +329,16 @@ Pass `-DNM2_BRIDGE_USB_ROLE=HOST` instead for the HOST role. Note:
 from a parent project) — CMake does not reliably resolve a bare relative
 path against the invocation directory for this option.
 
-### third_party dependencies (NXP)
+### third_party dependencies (NXP, Pico, pico_w)
 
-The NXP example's USB MIDI support is built from source against three
-public upstream projects vendored as git submodules in this release repo
-(not part of NetworkMIDI2's own proprietary source):
-`third_party/tusb_ump`, `third_party/AM_MIDI2.0Lib`, and `third_party/tinyusb`.
-Run `git submodule update --init --recursive` once after cloning this
-release repo before building the NXP example from source. (The Pico/pico_w
-examples reference these same submodules too, but building them from this
-release package is unsupported for a different, deeper reason — see Known
-Issue #12 below.)
+The NXP, Pico (W5500-EVB-Pico), and pico_w examples' USB MIDI support is
+built from source against public upstream projects vendored as git
+submodules in this release repo (not part of NetworkMIDI2's own proprietary
+source): `third_party/tusb_ump`, `third_party/AM_MIDI2.0Lib`, and (NXP and
+Pico only) `third_party/tinyusb` / `third_party/ioLibrary_Driver`
+respectively. Run `git submodule update --init --recursive` once after
+cloning this release repo before building any of these examples from
+source.
 
 **POSIX (macOS arm64):**
 ```bash
@@ -364,6 +363,42 @@ cmake -B build_pico/rp2350 \
       examples/midi_bridge/lwip
 cmake --build build_pico/rp2350 -j4
 # Flash: build_pico/rp2350/nm2_pico.uf2
+```
+
+**W5500-EVB-Pico NetworkMIDI2_Bridge** (needs `git submodule update --init
+--recursive` first — see above; links `lib/pico/rp2040-w5500/`, NOT
+`lib/pico/rp2040`, see that library's own comment):
+```bash
+# DEVICE role:
+cmake -B build_pico_device_evb \
+      -DPICO_SDK_PATH=~/.pico-sdk/sdk/2.3.0 \
+      -DPICO_BOARD=pico \
+      -DNM2_BRIDGE_USB_ROLE=DEVICE \
+      -DNM2_WIZNET_BOARD=W5500_EVB_PICO \
+      examples/midi_bridge/pico
+cmake --build build_pico_device_evb -j6
+# Flash: build_pico_device_evb/nm2_bridge_pico.uf2
+
+# HOST role:
+cmake -B build_pico_host_evb \
+      -DPICO_SDK_PATH=~/.pico-sdk/sdk/2.3.0 \
+      -DPICO_BOARD=pico \
+      -DNM2_BRIDGE_USB_ROLE=HOST \
+      -DNM2_WIZNET_BOARD=W5500_EVB_PICO \
+      examples/midi_bridge/pico
+cmake --build build_pico_host_evb -j6
+# Flash: build_pico_host_evb/nm2_bridge_pico.uf2
+```
+
+**Pico 2 W WiFi NetworkMIDI2 Bridge (pico_w, experimental)** (needs
+submodules too; see Known Issue #13 for its unresolved USB enumeration bug):
+```bash
+cmake -B build_pico2w \
+      -DPICO_SDK_PATH=~/.pico-sdk/sdk/2.3.0 \
+      -DPICO_BOARD=pico2_w \
+      examples/midi_bridge/pico_w
+cmake --build build_pico2w -j6
+# Flash: build_pico2w/nm2_bridge_pico_w.uf2
 ```
 
 **Pico 2 W FreeRTOS:**
@@ -467,19 +502,16 @@ cmake --build build_pico_host_evb -j6
     entirely rather than ship a console that can go dead with no indication.
     See `examples/midi_bridge/pico/README.md`'s Console section.
 
-12. **Pico/pico_w: building the USB MIDI examples from this release package
-    is currently unsupported.** Unlike every other example in this
-    distribution, `examples/midi_bridge/pico/` and `pico_w/` compile
-    NetworkMIDI2's own core (`src/Protocol.cpp`, `NetworkMidiSession.cpp`,
-    etc.) from source rather than linking a pre-built library — and that
-    source is not included in this distribution (see "What's included"
-    above). Their `CMakeLists.txt` files are unmodified copies of the dev
-    repository's own build files, which is why they still reference
-    `${CMAKE_CURRENT_LIST_DIR}/../../../src/`. Use the pre-built
-    `bin/pico/w5500-evb-pico/{device,host}/nm2_bridge_pico.uf2` binaries
-    instead; build-from-source support (an IMPORTED-library release
-    template, same fix applied to the NXP example above) will be ported in
-    a future release.
+13. **pico_w: composite USB device (MIDI+CDC) does not enumerate on macOS
+    on RP2350 (Pico 2 W).** Confirmed via extensive isolation this is not a
+    bug in this project's descriptors, tusb_ump, board/CMake config, or the
+    `tusb_init()` API used — it reproduces with 100% stock TinyUSB
+    descriptors/class driver too, and matches the class of bug tracked
+    upstream at `raspberrypi/pico-sdk#2216` (link-layout-sensitive, open,
+    milestone 2.4.0). UART console, config menu, and WiFi setup all work
+    correctly; only USB device enumeration is affected. Revisit once
+    pico-sdk 2.4.0 ships. This example is experimental/preview for that
+    reason — no pre-built binary is shipped for it.
 
 ---
 

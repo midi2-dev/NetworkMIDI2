@@ -12,7 +12,7 @@ for embedded and desktop platforms. Developed by [AmeNote Inc.](https://amenote.
 | Pre-built static libraries | `lib/<platform>/` |
 | Pre-compiled example binaries | `bin/<platform>/` |
 | Example source code | `examples/midi_bridge/` |
-| USB MIDI third-party deps (git submodules, NXP example only) | `third_party/{tusb_ump,AM_MIDI2.0Lib,tinyusb}/` |
+| USB MIDI third-party deps (git submodules; NXP, Pico, and pico_w examples) | `third_party/{tusb_ump,AM_MIDI2.0Lib,tinyusb,ioLibrary_Driver}/` |
 | CMake `find_package()` support | `cmake/NetworkMidi2Config.cmake` |
 | Linux cross-compile toolchains | `cmake/toolchain-linux-*.cmake` |
 | NXP toolchain file | `cmake/toolchain-nxp-mcxn947.cmake` |
@@ -24,7 +24,8 @@ for embedded and desktop platforms. Developed by [AmeNote Inc.](https://amenote.
 Source code is proprietary and not included in this distribution
 (`third_party/` above is public upstream code this repo depends on, not
 NetworkMIDI2's own source — run `git submodule update --init --recursive`
-once after cloning if you'll build the NXP example from source).
+once after cloning if you'll build the NXP, Pico, or pico_w examples from
+source).
 
 ---
 
@@ -247,6 +248,7 @@ session.beginClient(hostEp, 5005, &auth);
 | Linux aarch64 (RPi 4/5, 64-bit OS) | `nm2_transport_posix` | `lib/linux/aarch64/` |
 | Linux armhf (RPi 2/3/4, 32-bit OS) | `nm2_transport_posix` | `lib/linux/armhf/` |
 | Pico W (RP2040) | `nm2_transport_lwip` | `lib/pico/rp2040/` |
+| Pico (RP2040) + WIZnet W5500 Ethernet | `nm2_transport_lwip` | `lib/pico/rp2040-w5500/` — NOT interchangeable with `lib/pico/rp2040/`, different `lwipopts.h` |
 | Pico 2 W (RP2350, bare-metal) | `nm2_transport_lwip` | `lib/pico/rp2350/` |
 | Pico 2 W (RP2350, FreeRTOS) | `nm2_transport_lwip` | `lib/pico/rp2350-rtos/` |
 | NXP FRDM-MCXN947 (Cortex-M33) | `nm2_transport_nxp` | `lib/nxp/mcxn947/` |

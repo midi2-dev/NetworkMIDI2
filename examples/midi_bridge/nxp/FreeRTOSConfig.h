@@ -68,12 +68,20 @@ extern uint32_t SystemCoreClock;
 #define configQUEUE_REGISTRY_SIZE               8
 
 // ---------------------------------------------------------------------------
-// Memory — MCX N947 has 512 KB SRAM total.
-// 256 KB for FreeRTOS heap leaves headroom for lwIP pools and BSS/stack.
+// Memory — MCX N947 has 512 KB SRAM total, but only the 384 KB SRAM region
+// is linked here (see linker/nm2_nxp_mcxn947.ld); SRAMX/SRAMH are unused.
+// 232 KB for FreeRTOS heap leaves headroom for lwIP pools and BSS/stack --
+// trimmed from 256 KB to fit the HOST role's build (NM2_BRIDGE_USB_ROLE=
+// HOST, see CMakeLists.txt), whose TinyUSB host-stack static structures
+// (ehci_data, usbh device/endpoint tables) add enough BSS to overflow the
+// link at 256 KB. This is a static reservation, not actual usage -- this
+// app allocates only a handful of long-lived objects (NetworkMidiSession,
+// discovery/transport state) at dynamic runtime, so 232 KB is still ample
+// headroom for either role, not a tight fit.
 // ---------------------------------------------------------------------------
 #define configSUPPORT_STATIC_ALLOCATION         0
 #define configSUPPORT_DYNAMIC_ALLOCATION        1
-#define configTOTAL_HEAP_SIZE                   ( ( size_t ) ( 256 * 1024 ) )
+#define configTOTAL_HEAP_SIZE                   ( ( size_t ) ( 232 * 1024 ) )
 #define configAPPLICATION_ALLOCATED_HEAP        0
 
 // ---------------------------------------------------------------------------

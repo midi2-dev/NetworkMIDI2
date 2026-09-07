@@ -49,6 +49,7 @@
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/netifapi.h"
+#include "lwip/dns.h"
 
 // NXP SDK lwIP MCX Ethernet netif
 extern "C" {
@@ -58,6 +59,9 @@ extern "C" {
 // FreeRTOS
 #include "FreeRTOS.h"
 #include "semphr.h"
+
+// TinyUSB — forwards the USB1 HS controller's interrupt into TinyUSB's core.
+#include "tusb.h"
 
 #include <cstring>
 #include <cstdio>
@@ -135,7 +139,7 @@ void NM2_BoardInit(void)
     NVIC_SetPriority(ETHERNET_MACLP_IRQn, configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY);
 }
 
-void NM2_NetifInit(const uint8_t *mac6)
+void NM2_NetifAdd(const uint8_t *mac6)
 {
     const uint8_t *mac = mac6 ? mac6 : kDefaultMac;
 
@@ -152,16 +156,92 @@ void NM2_NetifInit(const uint8_t *mac6)
     s_ethConfig.srcClockHz  = NM2_ENET_CLK_HZ;
     memcpy(s_ethConfig.macAddress, mac, 6);
 
-    // Add the ENET netif and start DHCP.
+    // Add the ENET netif, but leave it down -- DHCP vs. static IP is a
+    // runtime setup-menu choice made later, from vSessionTask (see
+    // NM2_NetifStartDhcp()/NM2_NetifSetStatic() below).
     // Called from main() before vTaskStartScheduler(), so tcpip_thread has not
     // started yet — netif_add() is safe without core locking.
     ip4_addr_t zero = IPADDR4_INIT(0U);
     netif_add(&s_netif, &zero, &zero, &zero,
               &s_ethConfig, ethernetif0_init, tcpip_input);
     netif_set_default(&s_netif);
+}
+
+void NM2_NetifStartDhcp(void)
+{
+    netif_set_up(&s_netif);
+    dhcp_start(&s_netif);
+}
+
+bool NM2_NetifSetStatic(const char *ip, const char *netmask, const char *gateway, const char *dns)
+{
+    ip4_addr_t ipAddr, nmAddr, gwAddr;
+    if (!ip4addr_aton(ip, &ipAddr) || !ip4addr_aton(netmask, &nmAddr) || !ip4addr_aton(gateway, &gwAddr)) {
+        return false;
+    }
+
+    netif_set_addr(&s_netif, &ipAddr, &nmAddr, &gwAddr);
     netif_set_up(&s_netif);
 
-    dhcp_start(&s_netif);
+    if (dns && dns[0]) {
+        ip4_addr_t dnsAddr;
+        if (ip4addr_aton(dns, &dnsAddr)) {
+            ip_addr_t dnsIpAddr = IPADDR4_INIT(dnsAddr.addr);
+            dns_setserver(0, &dnsIpAddr);
+        }
+    }
+
+    return true;
+}
+
+void NM2_UsbHsInit(void)
+{
+    // Bump DCDC to 1.8V / CORELDO to 1.1V (default is 1.8V/1.0V) -- required
+    // headroom for the USB HS PHY. Verbatim from TinyUSB's hw/bsp/mcx/family.c
+    // board_init() BOARD_TUD_RHPORT==1 branch (register-level only; no
+    // dependency on TinyUSB's own board.c/pin_mux.c/clock_config.c).
+    SPC0->ACTIVE_VDELAY = 0x0500;
+    SPC0->ACTIVE_CFG &= ~SPC_ACTIVE_CFG_CORELDO_VDD_DS_MASK;
+    SPC0->ACTIVE_CFG |= SPC_ACTIVE_CFG_DCDC_VDD_LVL(0x3) | SPC_ACTIVE_CFG_CORELDO_VDD_LVL(0x3) |
+                        SPC_ACTIVE_CFG_SYSLDO_VDD_DS_MASK | SPC_ACTIVE_CFG_DCDC_VDD_DS(0x2u);
+    while (SPC0->SC & SPC_SC_BUSY_MASK) {}
+
+    if (0u == (SCG0->LDOCSR & SCG_LDOCSR_LDOEN_MASK)) {
+        SCG0->TRIM_LOCK = 0x5a5a0001U;
+        SCG0->LDOCSR |= SCG_LDOCSR_LDOEN_MASK;
+        while (0U == (SCG0->LDOCSR & SCG_LDOCSR_VOUT_OK_MASK)) {}
+    }
+
+    SYSCON->AHBCLKCTRLSET[2] |= SYSCON_AHBCLKCTRL2_USB_HS_MASK | SYSCON_AHBCLKCTRL2_USB_HS_PHY_MASK;
+
+    // System oscillator, 20-30 MHz crystal (FRDM-MCXN947's board crystal), for
+    // the USB HS PHY PLL reference.
+    SCG0->SOSCCFG &= ~(SCG_SOSCCFG_RANGE_MASK | SCG_SOSCCFG_EREFS_MASK);
+    SCG0->SOSCCFG = (1U << SCG_SOSCCFG_RANGE_SHIFT) | (1U << SCG_SOSCCFG_EREFS_SHIFT);
+    SCG0->SOSCCSR |= SCG_SOSCCSR_SOSCEN_MASK;
+    while (0 == (SCG0->SOSCCSR & SCG_SOSCCSR_SOSCVLD_MASK)) {}
+
+    SYSCON->CLOCK_CTRL |= SYSCON_CLOCK_CTRL_CLKIN_ENA_MASK | SYSCON_CLOCK_CTRL_CLKIN_ENA_FM_USBH_LPT_MASK;
+    CLOCK_EnableClock(kCLOCK_UsbHs);
+    CLOCK_EnableClock(kCLOCK_UsbHsPhy);
+    CLOCK_EnableUsbhsPhyPllClock(kCLOCK_Usbphy480M, 24000000U);
+    CLOCK_EnableUsbhsClock();
+
+    // USB PHY calibration/trim.
+#if ((!(defined FSL_FEATURE_SOC_CCM_ANALOG_COUNT)) && (!(defined FSL_FEATURE_SOC_ANATOP_COUNT)))
+    USBPHY->TRIM_OVERRIDE_EN = 0x001fU; // override IFR value
+#endif
+    USBPHY->CTRL |= USBPHY_CTRL_SET_ENUTMILEVEL2_MASK | USBPHY_CTRL_SET_ENUTMILEVEL3_MASK;
+    USBPHY->PWD = 0;
+
+    uint32_t phytx = USBPHY->TX;
+    phytx &= ~(USBPHY_TX_D_CAL_MASK | USBPHY_TX_TXCAL45DM_MASK | USBPHY_TX_TXCAL45DP_MASK);
+    phytx |= USBPHY_TX_D_CAL(0x04) | USBPHY_TX_TXCAL45DP(0x07) | USBPHY_TX_TXCAL45DM(0x07);
+    USBPHY->TX = phytx;
+
+    // FreeRTOS + TinyUSB: IRQ priority must be numerically >= the max syscall
+    // priority so tud_int_handler() can safely call FreeRTOS FromISR APIs.
+    NVIC_SetPriority(USB1_HS_IRQn, configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY);
 }
 
 int NM2_GetCharNonBlocking(void)
@@ -202,6 +282,12 @@ extern "C" int _write(int /*fd*/, const char *buf, int len)
 // ---------------------------------------------------------------------------
 
 extern "C" {
+
+// USB1 High-Speed controller IRQ -- forwards to TinyUSB core.
+void USB1_HS_IRQHandler(void)
+{
+    tusb_int_handler(1, true);
+}
 
 void vAssertCalled(const char *pcFile, uint32_t ulLine)
 {

@@ -62,17 +62,22 @@ set(CMAKE_C_FLAGS_INIT
      -ffunction-sections \
      -fdata-sections \
      -fno-common \
-     -ffreestanding \
      -Wall \
      -Wextra"
 )
 
+# No -ffreestanding: it disables libstdc++'s hosted-only headers (<map>,
+# <functional>, ...), which third_party/AM_MIDI2.0Lib's midiCIProcessor.cpp
+# needs -- the same library the Pico DEVICE-role build already links
+# successfully, since its toolchain never set this flag. newlib-nano +
+# nosys.specs (linker flags below) already constrain the C library to a
+# bare-metal-appropriate subset; -ffreestanding was stricter than that
+# actually required and blocked headers this project needs.
 set(CMAKE_CXX_FLAGS_INIT
     "${_NXP_CPU_FLAGS_STR} \
      -ffunction-sections \
      -fdata-sections \
      -fno-common \
-     -ffreestanding \
      -fno-exceptions \
      -fno-rtti \
      -Wall \
@@ -88,7 +93,6 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT
      -Wl,--gc-sections \
      -Wl,--print-memory-usage \
      -fno-common \
-     -ffreestanding \
      -specs=nano.specs \
      -specs=nosys.specs"
 )

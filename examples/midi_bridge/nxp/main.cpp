@@ -42,10 +42,16 @@
 
 #include "board_init.h"
 #include "SessionTask.h"
+#include "fsl_cmc.h"
 
 #include "lwip/tcpip.h"
 #include "FreeRTOS.h"
 #include "task.h"
+
+#include "tusb.h"
+#if NM2_BRIDGE_USB_HOST
+#include "host/hcd.h"
+#endif
 
 #include <cstdio>
 #include <cstddef>
@@ -64,6 +70,63 @@ void  operator delete(void *p, size_t) noexcept { vPortFree(p); }
 static constexpr uint32_t    kSessionStackWords = 1536; // 1536 * 4 = 6144 bytes
 static constexpr UBaseType_t kSessionPriority   = 2;
 
+// USB task: runs tud_task() (DEVICE role) or tuh_task() (HOST role,
+// NM2_BRIDGE_USB_ROLE=HOST, see CMakeLists.txt) forever. Must run at a
+// priority high enough to service USB promptly; tusb_init() itself must be
+// called from task context after the scheduler starts (TinyUSB's IRQ
+// handling uses FreeRTOS queue/semaphore APIs internally once
+// CFG_TUSB_OS=OPT_OS_FREERTOS).
+static constexpr uint32_t    kUsbStackWords = 512; // 2048 bytes
+static constexpr UBaseType_t kUsbPriority   = configMAX_PRIORITIES - 1;
+
+#if NM2_BRIDGE_USB_HOST
+extern "C" void vUsbDeviceTask(void * /*params*/)
+{
+    tusb_rhport_init_t hostInit{};
+    hostInit.role  = TUSB_ROLE_HOST;
+    hostInit.speed = TUSB_SPEED_AUTO;
+    tusb_init(BOARD_TUH_RHPORT, &hostInit);
+
+    // The chipidea HS host controller, like RP2040's, only notifies TinyUSB
+    // of a device via an edge-triggered connect interrupt -- if a device
+    // was already plugged in before tusb_init() ran, there's no edge to
+    // catch and it's silently never enumerated. Same workaround as
+    // examples/midi_bridge/pico/main.cpp's HOST role /
+    // UUT/USB_Host_UMP_Test.
+    if (hcd_port_connect_status(BOARD_TUH_RHPORT)) {
+        printf("USB device already attached at boot -- forcing enumeration\r\n");
+        hcd_event_device_attach(BOARD_TUH_RHPORT, false);
+    }
+
+    for (;;) {
+        tuh_task();
+    }
+}
+#else
+extern "C" void vUsbDeviceTask(void * /*params*/)
+{
+    tusb_rhport_init_t devInit{};
+    devInit.role  = TUSB_ROLE_DEVICE;
+    devInit.speed = TUSB_SPEED_AUTO;
+    tusb_init(BOARD_TUD_RHPORT, &devInit);
+
+    // A debugger-issued reset (MCU-Link/pyOCD during bench bring-up) resets
+    // the chip's logic but can leave the USB pull-up state change too brief
+    // for the host/hub to register as a real detach -- the host then keeps
+    // its stale, previously-enumerated descriptor set instead of re-reading
+    // the new one. A real power-cycle or cable replug doesn't have this
+    // problem; this pulse makes a bare debugger reset behave the same way.
+    // Same fix as the Pico DEVICE-role build (examples/midi_bridge/pico/main.cpp).
+    tud_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(250));
+    tud_connect();
+
+    for (;;) {
+        tud_task();
+    }
+}
+#endif // NM2_BRIDGE_USB_HOST
+
 // The NXP startup file (startup_mcxn947_cm33_core0.c) gates the
 // __libc_init_array() call on #if defined(__cplusplus), which is false when
 // the startup is compiled as C.  Call it explicitly here — data/bss are
@@ -79,14 +142,44 @@ int main(void)
     // Board init: clocks → 150 MHz, pin mux, debug UART retarget.
     NM2_BoardInit();
 
+    // Diagnostic: print why the MCU last reset, decoded from CMC0->SRS
+    // (System Reset Status). Added while investigating a reproducible reset
+    // triggered by opening the composite USB CDC console port -- this tells
+    // us definitively whether it's the watchdog, a core lockup, a software
+    // reset request, or something else, instead of guessing from symptoms.
+    {
+        uint32_t srs = CMC_GetSystemResetStatus(CMC0);
+        printf("\r\n[boot] Reset cause (CMC0->SRS = 0x%08lX):", (unsigned long) srs);
+        if (srs & (uint32_t) kCMC_WakeUpReset)              printf(" WAKEUP");
+        if (srs & (uint32_t) kCMC_PORReset)                 printf(" POR");
+        if (srs & (uint32_t) kCMC_VDReset)                  printf(" VOLTAGE_DETECT");
+        if (srs & (uint32_t) kCMC_PinReset)                 printf(" PIN");
+        if (srs & (uint32_t) kCMC_DAPReset)                 printf(" DAP/DEBUG");
+        if (srs & (uint32_t) kCMC_LowPowerAcknowledgeTimeoutReset) printf(" LOW_POWER_ACK_TIMEOUT");
+        if (srs & (uint32_t) kCMC_SCGReset)                 printf(" CLOCK_LOSS");
+        if (srs & (uint32_t) kCMC_WindowedWatchdog0Reset)   printf(" WATCHDOG0");
+        if (srs & (uint32_t) kCMC_SoftwareReset)            printf(" SOFTWARE");
+        if (srs & (uint32_t) kCMC_LockUoReset)              printf(" CPU_LOCKUP");
+        printf("\r\n\r\n");
+    }
+
+    // Power up and clock the USB1 High-Speed controller/PHY. tusb_init()
+    // itself is deferred to vUsbDeviceTask, which runs after the scheduler
+    // starts (see kUsbStackWords comment above).
+    NM2_UsbHsInit();
+
     // Start lwIP's tcpip_thread.  This creates the thread; the netif is added
     // below after tcpip_init() returns.
     tcpip_init(nullptr, nullptr);
 
-    // Add the ENET_QOS netif to lwIP and start DHCP.
-    // Must run after tcpip_init() and before vTaskStartScheduler() so the
-    // netif is valid when vSessionTask polls dhcp_supplied_address().
-    NM2_NetifInit(nullptr); // nullptr → use default MAC address
+    // Add the ENET_QOS netif to lwIP (left down -- DHCP vs. static IP is a
+    // runtime setup-menu choice vSessionTask makes later, see board_init.h).
+    // Must run after tcpip_init() and before vTaskStartScheduler().
+    NM2_NetifAdd(nullptr); // nullptr → use default MAC address
+
+    // USB device task: services the MIDI 2.0 (UMP) interface.
+    xTaskCreate(vUsbDeviceTask, "usbd",
+                kUsbStackWords, nullptr, kUsbPriority, nullptr);
 
     // Session task handles everything after this point.
     xTaskCreate(vSessionTask, "session",

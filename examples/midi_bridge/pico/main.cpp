@@ -1,0 +1,610 @@
+//
+// UUT_NetworkMIDI2_Bridge -- bridges Network MIDI 2.0 (UDP, via a Wiznet
+// W5500 Ethernet expansion board on the UUT J13 header) to USB MIDI 2.0
+// (tusb_ump). Structured the same way as UUT/DIN_Bridge: a tight
+// tud_task()-driven poll loop with no RTOS, just with a NetworkMIDI2
+// session standing in for the DIN UART.
+//
+// Two USB roles, selected at build time via NM2_BRIDGE_USB_ROLE (see
+// CMakeLists.txt):
+//   DEVICE (default) -- the bridge presents as a USB MIDI device to a host
+//     computer/DAW, answering Endpoint/Function Block Discovery locally.
+//   HOST -- the bridge is itself the USB host, bridging to a directly- or
+//     hub-attached USB MIDI device via the tusb_ump Host driver's current
+//     state (as developed/tested in UUT/USB_Host_UMP_Test -- see that
+//     app's README.md Known Issues for open caveats). That driver doesn't
+//     implement UMP Stream-message discovery yet, so the HOST role is a
+//     raw UMP pass-through in both directions, no discovery handling.
+// NM2_BRIDGE_USB_HOST (0 or 1, set by CMakeLists.txt from that option)
+// selects between the two throughout this file.
+//
+
+#include "pico/stdio.h"
+#include "pico/stdio/driver.h"
+#include "pico/time.h"
+#include "pico/unique_id.h"
+
+// Wiznet W5500 + lwIP bring-up (vendored/customized, see wiznet_port/).
+#include "port_common.h"
+#include "wizchip_conf.h"
+#include "socket.h"
+#include "w5x00_spi.h"
+#include "w5x00_lwip.h"
+
+#include "lwip/init.h"
+#include "lwip/netif.h"
+#include "lwip/timeouts.h"
+#include "lwip/etharp.h"
+#include "lwip/dhcp.h"
+
+// NetworkMIDI2 session (binary distribution, lwIP transport).
+#include "networkmidi2/NetworkMidiSession.h"
+#include "networkmidi2/Types.h"
+#include "LwipUdpTransport.h"
+#include "LwipMdnsDiscovery.h"
+
+// Runtime configuration (role, name, network settings) + boot-time setup
+// menu -- see issue #17. Replaces the compile-time #defines this file used
+// to have for NM2_USE_DHCP / NM2_STATIC_* / NM2_BRIDGE_ROLE_CLIENT.
+#include "bridge_config.h"
+#include "console_menu.h"
+
+// USB MIDI 2.0 (tusb_ump). DEVICE role (default): + UMP Endpoint/Function
+// Block Discovery, same as DIN_Bridge. HOST role (NM2_BRIDGE_USB_ROLE=HOST,
+// see CMakeLists.txt): uses the tusb_ump Host driver instead -- as of this
+// driver's current state it does NOT implement the UMP Stream-message
+// handshake (Endpoint/Function Block Discovery) at all (see
+// lib/tusb_ump/ump_host.h's scope notes), so unlike the DEVICE role this
+// bridge cannot answer or issue discovery over USB yet -- it's a raw UMP
+// pass-through in both directions, matching UUT/USB_Host_UMP_Test.
+#include "tusb.h"
+#if NM2_BRIDGE_USB_HOST
+#include "host/hcd.h"
+#include "ump_host.h"
+#else
+#include "ump_device.h"
+#include "include/umpProcessor.h"
+#include "include/umpMessageCreate.h"
+#endif
+
+using namespace networkmidi2;
+
+// ---------------------------------------------------------------------------
+// Network configuration
+// ---------------------------------------------------------------------------
+// Role, device name, and DHCP-vs-static network settings are runtime
+// configuration now (see bridge_config.h/console_menu.h, issue #17) rather
+// than compile-time #defines -- gBridgeConfig is loaded from flash (or
+// defaulted) and optionally edited via the boot-time setup menu in main().
+static BridgeConfig gBridgeConfig;
+
+#define NM2_SESSION_PORT 5004 // Network MIDI 2.0's recommended default port
+static uint16_t NM2_CLIENT_LOCAL_PORT = 5005;
+
+// Pressing this key at any time while the bridge is running re-enters the
+// setup menu in place -- USB and the W5500/lwIP netif both stay up
+// throughout, so missing the boot-time setup window (or wanting to change
+// something) doesn't require a physical power cycle or USB re-enumeration.
+// This used to call watchdog_reboot(), which dropped USB entirely and, back
+// when DEVICE role's console rode a USB CDC-ACM interface, took the console
+// down along with it -- by the time the console port re-enumerated on the
+// host the 3s boot-setup window had already passed, effectively impossible
+// to reach setup from a USB-only console. See the restart loop in main()
+// below.
+constexpr int kReconfigureKey = 0x1B; // ESC
+
+// Minimal UMP Endpoint Discovery identity, matching DIN_Bridge -- AmeNote
+// does not have a registered SysEx manufacturer ID, so this uses the
+// reserved "educational/non-commercial" prefix (0x7D) per the MIDI
+// Association spec.
+#define DEVICE_MFRID 0x7D, 0x00, 0x00
+#define DEVICE_FAMID 0x00, 0x00
+#define DEVICE_MODELID 0x00, 0x00
+#define DEVICE_VERSIONID 0, 1, 0, 0
+
+#if !NM2_BRIDGE_USB_HOST
+// Prints whether/when the device-side stack actually reaches
+// SET_CONFIGURATION -- tells apart "device never got configured" from "host
+// got stuck matching interface drivers after configuration succeeded" when
+// the composite MIDI+CDC device appears to hang on enumeration.
+extern "C" void tud_mount_cb(void) { printf("[USB] tud_mount_cb -- configured\n"); }
+extern "C" void tud_umount_cb(void) { printf("[USB] tud_umount_cb -- unconfigured\n"); }
+#endif
+
+// Defined in wiznet_port/w5x00_lwip.c.
+extern uint8_t mac[6];
+
+// ---------------------------------------------------------------------------
+// lwIP / W5500 state
+// ---------------------------------------------------------------------------
+static struct netif g_netif;
+#define SOCKET_MACRAW 0
+
+// ---------------------------------------------------------------------------
+// NetworkMIDI2 session state
+// ---------------------------------------------------------------------------
+static LwipUdpTransport nm2Transport;
+static NetworkMidiSession *nm2Session = nullptr;
+
+#if NM2_BRIDGE_USB_HOST
+// ---------------------------------------------------------------------------
+// HOST role: track the single currently-mounted USB MIDI device. This
+// bridge assumes one downstream USB MIDI device at a time (matching the
+// original DEVICE role's implicit single-device semantics, `tud_ump_n_
+// mounted(0)`) -- ump_host.cpp itself supports several simultaneously (see
+// UUT/USB_Host_UMP_Test's MAX_MOUNTED_UMP table) if this ever needs to
+// extend to more than one.
+// ---------------------------------------------------------------------------
+static bool s_usbHostMounted = false;
+static uint8_t s_usbHostDaddr = 0;
+static uint8_t s_usbHostItfNum = 0;
+
+// Invoked when a UMP interface finishes enumeration (ump_host.cpp).
+void tuh_ump_mount_cb(uint8_t daddr, uint8_t itf_num) {
+    printf("[%llu] USB HOST: UMP device mounted daddr=%u itf_num=%u\n", time_us_64(), daddr, itf_num);
+    s_usbHostMounted = true;
+    s_usbHostDaddr   = daddr;
+    s_usbHostItfNum  = itf_num;
+}
+
+void tuh_ump_umount_cb(uint8_t daddr, uint8_t itf_num) {
+    printf("[%llu] USB HOST: UMP device unmounted daddr=%u itf_num=%u\n", time_us_64(), daddr, itf_num);
+    if (s_usbHostMounted && s_usbHostDaddr == daddr && s_usbHostItfNum == itf_num) {
+        s_usbHostMounted = false;
+    }
+}
+
+#else // DEVICE role (original behavior)
+
+umpProcessor UMPHandler;
+
+void midiendpoint(uint8_t majVer, uint8_t minVer, uint8_t filter);
+void functionblock(uint8_t fbIdx, uint8_t filter);
+
+// Diagnostic: log every alt-setting change, matching DIN_Bridge.
+void tud_ump_set_itf_cb(uint8_t itf, uint8_t alt) {
+    printf("[%llu] ALT_SET itf=%d alt=%d (mVersion=%d)\n", time_us_64(), itf, alt, alt + 1);
+}
+
+// Reply to a host's UMP Endpoint Discovery request (Stream message, MT=0xF).
+// Same pattern as DIN_Bridge/main.cpp.
+void midiendpoint(uint8_t majVer, uint8_t minVer, uint8_t filter) {
+    (void) majVer;
+    (void) minVer;
+
+    if (filter & 0x1) {
+        std::array<uint32_t, 4> UMP = UMPMessage::mtFMidiEndpointInfoNotify(
+                1, true, true, false, false);
+        tud_ump_write_hton(0, UMP.data(), 4);
+    }
+
+    if (filter & 0x2) {
+        std::array<uint32_t, 4> UMP = UMPMessage::mtFMidiEndpointDeviceInfoNotify(
+                {DEVICE_MFRID}, {DEVICE_FAMID}, {DEVICE_MODELID}, {DEVICE_VERSIONID});
+        tud_ump_write_hton(0, UMP.data(), 4);
+    }
+
+    if (filter & 0x4) {
+        int nameLength = strlen(gBridgeConfig.name);
+        for (uint8_t offset = 0; offset < nameLength; offset += 14) {
+            std::array<uint32_t, 4> UMP = UMPMessage::mtFMidiEndpointTextNotify(
+                    MIDIENDPOINT_NAME_NOTIFICATION, offset, (uint8_t *) gBridgeConfig.name, nameLength);
+            tud_ump_write_hton(0, UMP.data(), 4);
+        }
+    }
+}
+
+// Reply to a host's UMP Function Block Discovery request. This bridge
+// exposes a single bidirectional function block covering the one UMP group
+// carried over the network session.
+void functionblock(uint8_t fbIdx, uint8_t filter) {
+    if (fbIdx != 0 && fbIdx != 0xFF) return;
+
+    if (filter & 0x1) {
+        std::array<uint32_t, 4> UMP = UMPMessage::mtFFunctionBlockInfoNotify(
+                0, true, 3 /*bidirectional*/, false /*sender*/, false /*recv*/,
+                0 /*firstGroup*/, 1 /*groupLength*/, 0x00 /*midiCISupport*/,
+                0 /*isMIDI1: full MIDI 2.0 bandwidth over the network transport*/,
+                0 /*maxS8Streams*/);
+        tud_ump_write_hton(0, UMP.data(), 4);
+    }
+
+    if (filter & 0x2) {
+        char const *name = "NetworkMIDI2 Bridge";
+        std::array<uint32_t, 4> UMP = UMPMessage::mtFFunctionBlockNameNotify(
+                0, 0, (uint8_t *) name, strlen(name));
+        tud_ump_write_hton(0, UMP.data(), 4);
+    }
+}
+#endif // NM2_BRIDGE_USB_HOST
+
+// Called synchronously from within nm2Session->tick() for each UMP message
+// received over the network. Per NetworkMIDI2's docs this must not block or
+// call sendUmp()/close() -- tuh_ump_write_hton()/tud_ump_write_hton() are
+// non-blocking FIFO writes, matching how DIN_Bridge forwards DIN bytes to
+// USB directly.
+static void onNetworkUmp(void *ctx, const uint32_t *words, size_t wordCount) {
+    (void) ctx;
+#if NM2_BRIDGE_USB_HOST
+    if (!s_usbHostMounted) return; // no downstream USB MIDI device yet
+    tuh_ump_write_hton(s_usbHostDaddr, s_usbHostItfNum, const_cast<uint32_t *>(words), (uint8_t) wordCount);
+#else
+    tud_ump_write_hton(0, const_cast<uint32_t *>(words), (uint8_t) wordCount);
+#endif
+}
+
+static void onNetworkStateChange(void *ctx, SessionState newState) {
+    (void) ctx;
+    static const char *kStateNames[] = {
+            "Idle", "PendingInvitation", "AuthRequired",
+            "Established", "PendingReset", "PendingBye",
+    };
+    printf("[%llu] NM2 session state -> %s\n", time_us_64(), kStateNames[(int) newState]);
+}
+
+// ---------------------------------------------------------------------------
+// Wiznet W5500 + lwIP netif bring-up
+// ---------------------------------------------------------------------------
+// False until wiznet_lwip_init() has brought a netif up; guards every path
+// that would otherwise touch the W5500 or lwIP on a board where the chip
+// never answered.
+static bool gNetworkUp = false;
+
+// Returns false if the W5500 never answered, in which case no netif was
+// brought up and the caller should skip anything network-dependent. USB is
+// already enumerated by this point and stays working either way (issue #19).
+static bool wiznet_lwip_init(const BridgeConfig &cfg) {
+    wizchip_spi_initialize();
+    wizchip_cris_initialize();
+
+    wizchip_reset();
+    wizchip_initialize();
+    if (!wizchip_check_ok()) {
+        printf("W5500 not responding -- continuing without Ethernet.\n");
+        return false;
+    }
+
+    w5x00_randomize_mac(); // per-board unique MAC -- see w5x00_lwip.h
+    setSHAR(mac);
+    ctlwizchip(CW_RESET_PHY, 0);
+
+    wiz_NetInfo netInfo = {};
+    memcpy(netInfo.mac, mac, 6);
+    if (cfg.useDhcp) {
+        netInfo.dhcp = NETINFO_DHCP;
+    } else {
+        netInfo.dhcp = NETINFO_STATIC;
+        parseDottedIp(cfg.staticIp, netInfo.ip);
+        parseDottedIp(cfg.staticNetmask, netInfo.sn);
+        parseDottedIp(cfg.staticGateway, netInfo.gw);
+        parseDottedIp(cfg.staticDns, netInfo.dns);
+    }
+    network_initialize(netInfo);
+    print_network_information(netInfo);
+
+    lwip_init();
+
+    if (cfg.useDhcp) {
+        netif_add(&g_netif, IP4_ADDR_ANY, IP4_ADDR_ANY, IP4_ADDR_ANY, NULL, netif_initialize, netif_input);
+    } else {
+        ip4_addr_t ip, sn, gw;
+        IP4_ADDR(&ip, netInfo.ip[0], netInfo.ip[1], netInfo.ip[2], netInfo.ip[3]);
+        IP4_ADDR(&sn, netInfo.sn[0], netInfo.sn[1], netInfo.sn[2], netInfo.sn[3]);
+        IP4_ADDR(&gw, netInfo.gw[0], netInfo.gw[1], netInfo.gw[2], netInfo.gw[3]);
+        netif_add(&g_netif, &ip, &sn, &gw, NULL, netif_initialize, netif_input);
+    }
+    g_netif.name[0] = 'e';
+    g_netif.name[1] = '0';
+
+    netif_set_link_callback(&g_netif, netif_link_callback);
+    netif_set_status_callback(&g_netif, netif_status_callback);
+
+    if (socket(SOCKET_MACRAW, Sn_MR_MACRAW, NM2_SESSION_PORT, 0x00) < 0) {
+        printf("MACRAW socket open failed\n");
+    }
+
+    netif_set_default(&g_netif);
+    netif_set_link_up(&g_netif);
+    netif_set_up(&g_netif);
+
+    if (cfg.useDhcp) {
+        dhcp_start(&g_netif);
+    }
+    gNetworkUp = true;
+    return true;
+}
+
+// Pump any pending Ethernet frames from the W5500 up into lwIP. Must be
+// called every loop iteration alongside sys_check_timeouts() since this
+// project runs lwIP in NO_SYS=1 (no tcpip thread) -- same pattern as the
+// RP2040-HAT-LWIP-C dhcp_dns example this was adapted from.
+static void wiznet_lwip_poll() {
+    if (!gNetworkUp) return; // no W5500, no MACRAW socket to read from
+
+    uint16_t pending = 0;
+    getsockopt(SOCKET_MACRAW, SO_RECVBUF, &pending);
+    if (pending == 0) return;
+
+    // recv_lwip()'s bounds check compares the incoming frame's declared
+    // length against the `len` we pass here -- it must be the actual
+    // capacity of packetBuf (sizeof(packetBuf)), NOT `pending` (the total
+    // bytes currently queued in the W5500's RX buffer, which can be larger
+    // than a single frame and is unrelated to packetBuf's size). Passing
+    // `pending` here made the bounds check a no-op and let a full-size
+    // Ethernet frame overflow a too-small buffer.
+    static uint8_t packetBuf[ETHERNET_FRAME_MAX_SIZE];
+    uint16_t pack_len = recv_lwip(SOCKET_MACRAW, packetBuf, sizeof(packetBuf));
+    if (pack_len == 0) return;
+
+    struct pbuf *p = pbuf_alloc(PBUF_RAW, pack_len, PBUF_POOL);
+    if (p == nullptr) return;
+    pbuf_take(p, packetBuf, pack_len);
+
+    LINK_STATS_INC(link.recv);
+    if (g_netif.input(p, &g_netif) != ERR_OK) {
+        pbuf_free(p);
+    }
+}
+
+// Passed to runClientHostSelect() as its network-pump callback -- see the
+// comment on that function in console_menu.h for why it's needed there.
+static void wiznet_lwip_poll_tick() {
+    wiznet_lwip_poll();
+    sys_check_timeouts();
+}
+
+// Passed to setConsolePump(): keeps the USB stack serviced while the
+// boot-time menus (over UART0, both roles -- see CMakeLists.txt) wait for
+// input, so USB MIDI enumeration/control transfers keep progressing even
+// while blocked on a keystroke there. Both roles' console pump is now the
+// ONLY driver of tud_task()/tuh_task() outside the main run loop:
+// pico_stdio_usb is disabled entirely for DEVICE role (no CDC interface in
+// usb_descriptors.cpp this release, see CMakeLists.txt's comment) so there
+// is no longer a background IRQ task competing to call the non-reentrant
+// tud_task() concurrently with this one, which is what used to wedge the
+// now-removed CDC console's RX path after a host-side reconnect (see git
+// log "fix CDC console RX wedging" if that history matters again).
+static void usb_task_tick() {
+#if NM2_BRIDGE_USB_HOST
+    tuh_task();
+#else
+    tud_task();
+#endif
+}
+
+int main() {
+#if !NM2_BRIDGE_USB_HOST
+    // DEVICE role: tusb_init() must run BEFORE stdio_init_all(), not after.
+    // pico_enable_stdio_usb's stdio_usb_init() (called from stdio_init_all())
+    // only auto-calls tusb_init() itself when PICO_STDIO_USB_ENABLE_TINYUSB_INIT
+    // defaults on -- which the SDK does NOT do once the app links tinyusb_device
+    // directly (LIB_TINYUSB_DEVICE, true for this build). Instead it takes the
+    // `assert(tud_inited())` path and expects the caller to have already
+    // initialized TinyUSB -- confirmed by reading stdio_usb.c directly. Getting
+    // this order backwards means stdio_usb_init() either asserts (debug builds)
+    // or drives an uninitialized USB core (release builds).
+    //
+    // Respond to the USB host's UMP Endpoint/Function Block Discovery
+    // requests, matching DIN_Bridge.
+    UMPHandler.setMidiEndpoint(midiendpoint);
+    UMPHandler.setFunctionBlock(functionblock);
+
+    tusb_init();
+
+    // A debugger-issued SWD reset (as used when reflashing over a picoprobe
+    // during bench bring-up) resets the RP2040 core/logic but can leave the
+    // USB pull-up state change too brief for the host/hub to register as a
+    // real detach -- the host then keeps its stale, previously-enumerated
+    // descriptor set instead of re-reading the new one. A real power-cycle
+    // or cable replug doesn't have this problem; this pulse makes a bare
+    // debugger reset behave the same way, so a new descriptor set is
+    // reliably picked up without a physical replug.
+    tud_disconnect();
+    sleep_ms(250);
+    tud_connect();
+#endif
+
+    stdio_init_all();
+
+    printf("Starting AmeNote ProtoZOA NetworkMIDI2 Bridge\n");
+
+    // Issue #19: bring USB up FIRST, before the setup menu, the W5500 and
+    // host discovery. The D+ pull-up is only asserted by tusb_init(), so
+    // until it runs the USB host does not even see a device attach -- and
+    // everything between here and there can stall for seconds or, with no
+    // serial console attached, forever. That is why the bridge showed up as
+    // nothing at all in Windows Device Manager while working on a macOS
+    // bench that always had a console and an Ethernet host present.
+    //
+    // Doing this first also keeps the board inside the 100mA that USB
+    // guarantees before SET_CONFIGURATION: enumeration now completes before
+    // wiznet_lwip_init() powers up the Ethernet PHY. DEVICE role now brings
+    // USB up even earlier than before (ahead of stdio_init_all() itself), so
+    // this guarantee only gets stronger, not weaker.
+    //
+    // HOST role: everything that waits from here on must keep calling
+    // tuh_task(), or the host's enumeration control transfers go unanswered
+    // -- see setConsolePump() below and the pumping in console_menu.cpp.
+
+#if NM2_BRIDGE_USB_HOST
+    tusb_rhport_init_t host_init = {};
+    host_init.role  = TUSB_ROLE_HOST;
+    host_init.speed = TUSB_SPEED_AUTO;
+    tusb_init(BOARD_TUH_RHPORT, &host_init);
+
+    // RP2040's host controller only notifies TinyUSB of a device via an
+    // edge-triggered connect interrupt -- if a device was already plugged
+    // in before tusb_init() ran, there's no edge to catch and it's silently
+    // never enumerated. Same workaround as UUT/USB_Host_UMP_Test.
+    if (hcd_port_connect_status(BOARD_TUH_RHPORT)) {
+        printf("USB device already attached at boot -- forcing enumeration\n");
+        hcd_event_device_attach(BOARD_TUH_RHPORT, false);
+    }
+#endif
+    setConsolePump(usb_task_tick);
+
+    loadBridgeConfig(gBridgeConfig);
+    bool enteredSetup = runConfigMenu(gBridgeConfig);
+
+    bool networkUp = wiznet_lwip_init(gBridgeConfig);
+
+    static LwipMdnsDiscovery mdnsDisc;
+
+    // EndpointInfo (name + product ID) is captured once here -- NetworkMidiSession
+    // is non-copyable/non-movable (see NetworkMidiSession.h) and takes it by
+    // const-ref at construction, so a name change from the ESC-triggered
+    // setup below cannot be applied to the already-constructed `session`
+    // without recreating it. Flagged with a printed note where that matters;
+    // still a small improvement over the old full-reboot path, which lost
+    // USB entirely just to reach setup at all.
+    EndpointInfo info;
+    info.setName(gBridgeConfig.name);
+    info.setProductId("com.amenote.protozoa.nm2-bridge");
+
+    NetworkMidiSession::Callbacks cb;
+    cb.ctx           = nullptr;
+    cb.onUmp          = onNetworkUmp;
+    cb.onStateChange = onNetworkStateChange;
+
+    static NetworkMidiSession session(nm2Transport, info, cb);
+    nm2Session = &session;
+
+    // Outer loop: normally runs exactly once. Re-entered, without a
+    // hardware reset, when ESC is pressed inside the run loop below --
+    // only the host-select -> session-(re)start sequence repeats each
+    // time. USB and the W5500/lwIP netif are brought up once above and
+    // stay up across every re-entry; see kReconfigureKey's comment.
+    for (;;) {
+        if (strncmp(info.name, gBridgeConfig.name, sizeof(info.name)) != 0) {
+            printf("Note: Network MIDI name change to \"%s\" needs a power cycle to take "
+                   "effect -- this session keeps advertising as \"%s\" for now.\n",
+                   gBridgeConfig.name, info.name);
+        }
+
+        // Client role: pick a host now that the network is up, either because
+        // the user just walked the setup menu or because no host has ever been
+        // configured (first boot).
+        bool haveClientHost = gBridgeConfig.clientHostIp[0] != '\0';
+        if (networkUp && gBridgeConfig.role == BridgeRole::Client &&
+            (enteredSetup || !haveClientHost)) {
+            haveClientHost = runClientHostSelect(gBridgeConfig, mdnsDisc, wiznet_lwip_poll_tick,
+                                                  LwipMdnsDiscovery::isNetifReady, enteredSetup);
+        }
+
+        // False when we never got as far as beginClient()/beginHost() -- the
+        // session object exists but has no transport bound, so the main loop
+        // must not tick() or send into it.
+        bool sessionStarted = true;
+
+        if (!networkUp) {
+            printf("No Ethernet -- running as a USB MIDI device only.\n");
+            sessionStarted = false;
+        } else if (gBridgeConfig.role == BridgeRole::Client && !haveClientHost) {
+            // Unattended boot with nothing discovered -- stay up as a USB MIDI
+            // device (already enumerated) and wait for the user to configure a
+            // host rather than dialling 0.0.0.0. See runClientHostSelect().
+            printf("Client role with no host configured -- not starting a session.\n"
+                   "Press ESC to enter setup and choose one.\n");
+            sessionStarted = false;
+        } else if (gBridgeConfig.role == BridgeRole::Client) {
+            uint8_t hostOctets[4];
+            parseDottedIp(gBridgeConfig.clientHostIp, hostOctets);
+            UdpEndpoint hostEp;
+            hostEp.ipv4 = (uint32_t(hostOctets[0]) << 24) | (uint32_t(hostOctets[1]) << 16) |
+                          (uint32_t(hostOctets[2]) << 8) | uint32_t(hostOctets[3]);
+            hostEp.port = gBridgeConfig.clientHostPort;
+            nm2Session->beginClient(hostEp, NM2_CLIENT_LOCAL_PORT);
+        } else {
+            nm2Session->beginHost(NM2_SESSION_PORT, &mdnsDisc);
+            printf("[Host] Listening at %s:%u\n", ip4addr_ntoa(netif_ip4_addr(&g_netif)), NM2_SESSION_PORT);
+        }
+
+        printf("Bridge running. Press ESC at any time to re-enter setup.\n");
+
+        bool reconfigureRequested = false;
+
+        // ------- Loop: pump lwIP/W5500, USB, and the NM2 session -------
+        while (true) {
+#if NM2_BRIDGE_USB_HOST
+            tuh_task();
+#else
+            tud_task();
+#endif
+
+            if (getchar_timeout_us(0) == kReconfigureKey) {
+                printf("ESC pressed -- re-entering setup...\n");
+                // Best-effort Bye -- we are not sticking around to pump
+                // tick() until the peer's BeReply arrives (about to tear
+                // this session down anyway), but this is still strictly
+                // better than the old watchdog_reboot(), which gave the
+                // peer no notice at all and relied purely on its own
+                // session timeout.
+                if (sessionStarted) nm2Session->close();
+                reconfigureRequested = true;
+                break;
+            }
+
+            wiznet_lwip_poll();
+            sys_check_timeouts();
+
+#if NM2_BRIDGE_USB_HOST
+        // USB -> Network: pull decoded UMP words from the attached USB MIDI
+        // device and forward each message into the NetworkMIDI2 session's
+        // TX FIFO. No Endpoint/Function Block Discovery handling here --
+        // the Host driver doesn't implement UMP Stream messages yet (see
+        // the include-block comment above), so this is a raw pass-through,
+        // same as UUT/USB_Host_UMP_Test.
+        if (s_usbHostMounted) {
+            uint32_t UMPpacket[4];
+            uint16_t umpCount = tuh_ump_read_ntoh(s_usbHostDaddr, s_usbHostItfNum, UMPpacket, 4);
+            if (umpCount && sessionStarted) {
+                if (!nm2Session->sendUmp(UMPpacket, umpCount)) {
+                    printf("[%llu] NM2 sendUmp dropped %u word(s) "
+                           "(FIFO full or session not established)\n",
+                           time_us_64(), umpCount);
+                }
+            }
+        }
+#else
+        // USB -> Network: drain tusb_ump and forward each UMP message into
+        // the NetworkMIDI2 session's TX FIFO.
+        if (tud_ump_n_mounted(0) && tud_ump_n_available(0)) {
+            uint32_t UMPpacket[4];
+            uint8_t umpCount = tud_ump_read_ntoh(0, UMPpacket, 4);
+            if (umpCount) {
+                for (uint8_t i = 0; i < umpCount; i++) {
+                    // Endpoint/Function Block Discovery Stream messages are
+                    // handled here; everything else (Channel Voice, etc.)
+                    // passes straight through to the network session.
+                    UMPHandler.processUMP(UMPpacket[i]);
+                }
+
+                // UMP Stream messages (Message Type 0xF -- Endpoint/Function
+                // Block Discovery and their replies) are answered locally
+                // above via midiendpoint()/functionblock(); they are USB<->
+                // host session-management traffic, not MIDI data, and must
+                // not also be relayed onto the NetworkMIDI2 session.
+                uint8_t messageType = (UMPpacket[0] >> 28) & 0xF;
+                if (messageType != 0xF && sessionStarted) {
+                    if (!nm2Session->sendUmp(UMPpacket, umpCount)) {
+                        printf("[%llu] NM2 sendUmp dropped %u word(s) "
+                               "(FIFO full or session not established)\n",
+                               time_us_64(), umpCount);
+                    }
+                }
+            }
+        }
+#endif
+
+        // Network -> USB happens inside tick() via onNetworkUmp() above.
+        if (sessionStarted) nm2Session->tick();
+        }
+
+        // Only reachable via the ESC handler above (ordinary run loop above
+        // is infinite otherwise) -- loop back and re-run setup immediately,
+        // with no boot-countdown gate, since pressing ESC already is the
+        // user asking for it.
+        runSetupNow(gBridgeConfig);
+        enteredSetup = true;
+    }
+}

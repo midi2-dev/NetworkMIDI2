@@ -1,5 +1,68 @@
 # NetworkMIDI2 Release Notes
 
+## v0.2.5 — September 2026
+
+**New example: W5500-EVB-Pico NetworkMIDI2_Bridge (USB MIDI 2.0 <-> Ethernet).**
+A standalone bridge application for a plain Raspberry Pi Pico (RP2040) fitted
+with WIZnet's W5500-EVB-Pico Ethernet expansion board — bridges USB MIDI 2.0
+(UMP) to a NetworkMIDI2 session over wired Ethernet. Unlike the other Pico
+examples, this one compiles NetworkMIDI2's core from source rather than
+linking the pre-built library (this repo *is* NetworkMIDI2), and supports
+two USB roles selected at build time:
+
+- **DEVICE role** (`bin/pico/w5500-evb-pico/device/nm2_bridge_pico.uf2`) —
+  presents as a USB MIDI 2.0 device to a host computer/DAW.
+- **HOST role** (`bin/pico/w5500-evb-pico/host/nm2_bridge_pico.uf2`) —
+  the Pico is itself the USB host, bridging a directly- or hub-attached USB
+  MIDI device. Requires the board's own 5V rail wired onto its USB
+  connector's VBUS pin — see `examples/midi_bridge/pico/README.md`'s "USB
+  host power (VBUS)" section.
+
+Both roles hardware-validated on a WIZnet W5500-EVB-Pico via Picoprobe/UART.
+DEVICE role's USB descriptor originally also included a CDC-ACM console
+interface alongside the MIDI function; this was found to have an RX-wedging
+bug (keystrokes could silently and permanently stop reaching the setup menu
+after a host-side tty reconnect, traced to two uncoordinated non-reentrant
+`tud_task()` callers) and was disabled for this release pending more field
+validation — both roles are UART0-only consoles now. `usb_descriptors.cpp`
+and `device/tusb_config.h` are shared with the `pico_w` example below (which
+still wants CDC on); the CDC console is off for this target specifically via
+its own `NM2_BRIDGE_USB_CDC=0` build definition, not a shared-file change.
+See `examples/midi_bridge/pico/README.md`'s Console section for details and
+git history if the CDC console is reintroduced here later.
+
+Full role/wiring documentation, build commands, and known limitations are in
+`examples/midi_bridge/pico/README.md`.
+
+**NXP FRDM-MCXN947: new USB HOST role.** Same DEVICE/HOST role toggle as the
+Pico examples (`NM2_BRIDGE_USB_ROLE`, build-time choice) — HOST role bridges
+a directly- or hub-attached USB MIDI 2.0/UMP device through the board's USB1
+ChipIdea High-Speed controller (now running TinyUSB's host/EHCI stack) to a
+NetworkMIDI2 session, same raw-pass-through limitation (no UMP Stream
+discovery yet) as the Pico HOST role. Requires a cable/adapter capable of
+sourcing VBUS; since this board has no separate power input, a
+current-limited host port or unpowered hub ahead of the MCU-Link connection
+can starve a higher-current downstream device. Hardware-validated. Console
+is the MCU-Link virtual COM port (LPUART4, 115200 baud) for both roles — USB1
+is entirely committed to the MIDI interface. See
+`examples/midi_bridge/nxp/README.md` for full details.
+
+**New (experimental) example: Pico 2 W NetworkMIDI2 Bridge (WiFi, source
+only — no pre-built binary yet).** `examples/midi_bridge/pico_w/` bridges USB
+MIDI 2.0 to a NetworkMIDI2 session over WiFi on a Pico 2 W (RP2350 + cyw43),
+reusing the W5500-EVB-Pico example's composite USB descriptors by path
+(`../pico/usb_descriptors.cpp`, `../pico/device/tusb_config.h` — CDC console
+included, see above). **Known issue, unresolved:** the composite USB device
+does not currently enumerate on macOS on this board — isolated to a
+link-layout-sensitive RP2350 defect tracked upstream at
+`raspberrypi/pico-sdk#2216`, not a bug in this project's descriptors or
+config. UART console, config menu, and WiFi setup all work; only USB device
+enumeration is affected. No pre-built `.uf2` is shipped for this example
+yet — build from source per `examples/midi_bridge/pico_w/README.md` if you
+want to track the upstream fix.
+
+---
+
 ## v0.2.4 — August 2026
 
 **Catch-up rebuild — Linux (x86_64/aarch64/armhf) and NXP FRDM-MCXN947
@@ -224,20 +287,34 @@ mDNS name, and role (Host or Client). The FreeRTOS example additionally
 supports on-demand packet-drop simulation (`d`, `D`, `r` keys) to exercise
 the FEC retransmit path.
 
+### W5500-EVB-Pico NetworkMIDI2_Bridge Example (`bin/pico/w5500-evb-pico/`, source: `examples/midi_bridge/pico/`)
+
+| Binary | Description |
+|---|---|
+| `bin/pico/w5500-evb-pico/device/nm2_bridge_pico.uf2` | Presents as a USB MIDI 2.0 device to a host computer/DAW |
+| `bin/pico/w5500-evb-pico/host/nm2_bridge_pico.uf2` | Pico is the USB host; bridges a directly-/hub-attached USB MIDI device |
+
+Requires a plain Pico (RP2040) fitted with WIZnet's W5500-EVB-Pico Ethernet
+expansion board. Flash by holding BOOTSEL and dragging the `.uf2` file onto
+the Pico's USB mass-storage drive. **Console is UART0 only for both roles**
+(115200 baud) — connect a USB-serial adapter or debug probe to the Pico's
+UART0 TX/RX pins; there is no USB CDC console in this release (see Known
+Issues below). The boot-time setup menu prompts for bridge role (Host or
+Client, i.e. which side initiates the NetworkMIDI2 session — independent of
+the USB role above), device name, and DHCP vs. static IP; press ESC any time
+while running to re-enter setup. **HOST role** additionally requires the
+board's own 5V rail wired onto its USB connector's VBUS pin so a downstream
+USB device can enumerate — see `examples/midi_bridge/pico/README.md`'s "USB
+host power (VBUS)" section.
+
 ### Building Examples from Source
 
 The example CMakeLists.txt files build against the pre-built libs in this
 distribution — no NetworkMIDI2 source is required.
 
-**NXP FRDM-MCXN947:**
-```bash
-cmake -B build_nxp \
-      -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-nxp-mcxn947.cmake \
-      -DMCUX_SDK_PATH=/path/to/sdk \
-      examples/midi_bridge/nxp
-cmake --build build_nxp
-pyocd flash --target mcxn947 --format elf build_nxp/nm2_nxp_mcxn947
-```
+**NXP FRDM-MCXN947:** building this example from source via this release
+package is currently unsupported — see Known Issue #12 below. Use the
+pre-built `bin/nxp/mcxn947/nm2_nxp_mcxn947` binary instead.
 
 **POSIX (macOS arm64):**
 ```bash
@@ -276,6 +353,30 @@ cmake --build build_pico/rp2350-rtos -j4
 
 FreeRTOS-Kernel V11.1.0 is fetched automatically from GitHub via
 `FetchContent` if `FREERTOS_KERNEL_PATH` is not set.
+
+**W5500-EVB-Pico NetworkMIDI2_Bridge** (compiles NetworkMIDI2 from source,
+not against the pre-built libs — this repo *is* NetworkMIDI2):
+```bash
+# DEVICE role:
+cmake -B build_pico_device_evb \
+      -DPICO_SDK_PATH=~/.pico-sdk/sdk/2.3.0 \
+      -DPICO_BOARD=pico \
+      -DNM2_BRIDGE_USB_ROLE=DEVICE \
+      -DNM2_WIZNET_BOARD=W5500_EVB_PICO \
+      examples/midi_bridge/pico
+cmake --build build_pico_device_evb -j6
+# Flash: build_pico_device_evb/nm2_bridge_pico.uf2
+
+# HOST role:
+cmake -B build_pico_host_evb \
+      -DPICO_SDK_PATH=~/.pico-sdk/sdk/2.3.0 \
+      -DPICO_BOARD=pico \
+      -DNM2_BRIDGE_USB_ROLE=HOST \
+      -DNM2_WIZNET_BOARD=W5500_EVB_PICO \
+      examples/midi_bridge/pico
+cmake --build build_pico_host_evb -j6
+# Flash: build_pico_host_evb/nm2_bridge_pico.uf2
+```
 
 ---
 
@@ -331,6 +432,25 @@ FreeRTOS-Kernel V11.1.0 is fetched automatically from GitHub via
     the board, or send any character after connecting to trigger the prompt.
     The FreeRTOS example sets `PICO_STDIO_USB_CONNECTION_WITHOUT_DTR=1`
     and does not have this limitation.
+
+11. **W5500-EVB-Pico NetworkMIDI2_Bridge: no USB CDC console.** Both DEVICE
+    and HOST roles use UART0 only for the boot-time setup menu and runtime
+    logging in this release. A USB CDC-ACM console interface existed
+    alongside the MIDI function in DEVICE role during development, but its
+    RX direction could silently and permanently stop delivering keystrokes
+    after the host reconnected to the CDC tty — pulled from the descriptor
+    entirely rather than ship a console that can go dead with no indication.
+    See `examples/midi_bridge/pico/README.md`'s Console section.
+
+12. **NXP FRDM-MCXN947: building the example from this release package is
+    currently unsupported.** `examples/midi_bridge/nxp/CMakeLists.txt` in
+    this distribution predates the current example's USB MIDI/TinyUSB
+    integration and DEVICE/HOST role option, and also targets an older,
+    incompatible NXP SDK driver layout (ENET_QOS/phyksz8081 vs. the current
+    example's plain ENET/phylan8741) — it will not compile against the
+    current `SessionTask.cpp`/`board_init.cpp`/`usb_descriptors.cpp`. Use
+    the pre-built `bin/nxp/mcxn947/nm2_nxp_mcxn947` binary (DEVICE role) for
+    now; build-from-source support will be ported in a future release.
 
 ---
 

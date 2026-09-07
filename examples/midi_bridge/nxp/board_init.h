@@ -43,6 +43,7 @@
 
 #pragma once
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,15 +58,43 @@ extern "C" {
 void NM2_BoardInit(void);
 
 /**
- * @brief Add the ENET_QOS netif to lwIP and start DHCP.
+ * @brief Add the ENET_QOS netif to lwIP, but do not bring it up yet.
  *
  * Must be called from main(), after tcpip_init() returns, while still in
- * single-threaded context (before vTaskStartScheduler).
+ * single-threaded context (before vTaskStartScheduler). Registers the
+ * netif with an all-zero address and leaves it down -- deliberately split
+ * from starting DHCP or assigning a static address (NM2_NetifStartDhcp() /
+ * NM2_NetifSetStatic() below), since which of those to use is a runtime
+ * setup-menu choice (SessionTask.cpp's Network -- [D]HCP or [S]tatic IP
+ * prompt) decided after the scheduler starts, not something known yet at
+ * this call site.
  *
  * @param mac6  Pointer to a 6-byte MAC address (OUI + device-specific bytes).
  *              If NULL, a locally-administered default is used.
  */
-void NM2_NetifInit(const uint8_t *mac6);
+void NM2_NetifAdd(const uint8_t *mac6);
+
+/**
+ * @brief Bring the netif up and start DHCP.
+ *
+ * Called once, from vSessionTask after the DHCP-vs-static setup-menu
+ * choice is known (or after the boot-time setup gate times out with the
+ * default choice, DHCP). Must be called with LOCK_TCPIP_CORE() held (the
+ * caller is a FreeRTOS task running after vTaskStartScheduler(), not the
+ * single-threaded pre-scheduler context NM2_NetifAdd() runs in).
+ */
+void NM2_NetifStartDhcp(void);
+
+/**
+ * @brief Assign a static IPv4 address/netmask/gateway/DNS and bring the
+ * netif up (no DHCP).
+ *
+ * Same call-site/locking requirements as NM2_NetifStartDhcp(). Each
+ * parameter is a dotted-decimal string (e.g. "192.168.1.200"); returns
+ * false without changing anything if any of ip/netmask/gateway fails to
+ * parse (dns may be NULL/empty to skip setting a DNS server).
+ */
+bool NM2_NetifSetStatic(const char *ip, const char *netmask, const char *gateway, const char *dns);
 
 /**
  * @brief Non-blocking character read from the debug console.
@@ -76,6 +105,21 @@ void NM2_NetifInit(const uint8_t *mac6);
  * receive ISR).
  */
 int NM2_GetCharNonBlocking(void);
+
+/**
+ * @brief Power up and clock the USB1 ChipIdea High-Speed controller + PHY.
+ *
+ * FRDM-MCXN947's USB-C connector is wired to USB1 (rhport 1, High-Speed);
+ * USB0 (KHCI, Full-Speed) is not used by this example. Must be called before
+ * tusb_init() / tud_init(). Register sequence follows TinyUSB's own
+ * hw/bsp/mcx/family.c board_init() for BOARD_TUD_RHPORT==1 (SPC/DCDC voltage
+ * bump, USB HS PHY PLL from the 20-30 MHz crystal, then PHY calibration) --
+ * kept here rather than pulling in TinyUSB's whole board.c/pin_mux.c/
+ * clock_config.c, which would collide with this example's own
+ * NM2_BoardInit()/BOARD_InitBootPins()/BOARD_InitBootClocks() (same
+ * NXP-generated function names, different Config Tools project).
+ */
+void NM2_UsbHsInit(void);
 
 #ifdef __cplusplus
 }

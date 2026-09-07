@@ -266,6 +266,8 @@ Ready-to-run example binaries are in `bin/<platform>/`:
 | `nm2_pico.uf2` | Pico lwIP example — flash via BOOTSEL |
 | `nm2_pico_rtos.uf2` | Pico 2 W FreeRTOS example — flash via BOOTSEL |
 | `nm2_nxp_mcxn947` | NXP FRDM-MCXN947 FreeRTOS example — flash via pyocd (ELF) |
+| `w5500-evb-pico/device/nm2_bridge_pico.uf2` | W5500-EVB-Pico USB MIDI 2.0 <-> Ethernet bridge, DEVICE role — flash via BOOTSEL |
+| `w5500-evb-pico/host/nm2_bridge_pico.uf2` | W5500-EVB-Pico USB MIDI 2.0 <-> Ethernet bridge, HOST role — flash via BOOTSEL |
 
 Example source code is in `examples/midi_bridge/` and can be built from
 scratch using the included CMakeLists.txt files against the pre-built libs.

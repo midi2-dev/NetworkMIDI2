@@ -1,7 +1,7 @@
 [submodule "third_party/tusb_ump"]
 	path = third_party/tusb_ump
-	url = https://github.com/AmeNote-Michael/tusb_ump.git
-	branch = feature/usb-host-ump
+	url = https://github.com/midi2-dev/tusb_ump.git
+	branch = main
 [submodule "third_party/AM_MIDI2.0Lib"]
 	path = third_party/AM_MIDI2.0Lib
 	url = https://github.com/midi2-dev/AM_MIDI2.0Lib.git

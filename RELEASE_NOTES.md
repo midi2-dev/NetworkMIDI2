@@ -312,9 +312,34 @@ host power (VBUS)" section.
 The example CMakeLists.txt files build against the pre-built libs in this
 distribution — no NetworkMIDI2 source is required.
 
-**NXP FRDM-MCXN947:** building this example from source via this release
-package is currently unsupported — see Known Issue #12 below. Use the
-pre-built `bin/nxp/mcxn947/nm2_nxp_mcxn947` binary instead.
+**NXP FRDM-MCXN947** (compiles `third_party/tusb_ump`, `AM_MIDI2.0Lib`, and
+`tinyusb` from source — see "third_party dependencies" below):
+```bash
+git submodule update --init --recursive
+cmake -B build_nxp \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-nxp-mcxn947.cmake \
+      -DMCUX_SDK_PATH=/path/to/SDK_2_16_100_FRDM-MCXN947 \
+      -DNM2_BRIDGE_USB_ROLE=DEVICE \
+      examples/midi_bridge/nxp
+cmake --build build_nxp -j6
+pyocd flash --target mcxn947 --format elf build_nxp/nm2_nxp_mcxn947
+```
+Pass `-DNM2_BRIDGE_USB_ROLE=HOST` instead for the HOST role. Note:
+`-DCMAKE_TOOLCHAIN_FILE` must be an absolute path (or `${CMAKE_CURRENT_LIST_DIR}`-relative
+from a parent project) — CMake does not reliably resolve a bare relative
+path against the invocation directory for this option.
+
+### third_party dependencies (NXP)
+
+The NXP example's USB MIDI support is built from source against three
+public upstream projects vendored as git submodules in this release repo
+(not part of NetworkMIDI2's own proprietary source):
+`third_party/tusb_ump`, `third_party/AM_MIDI2.0Lib`, and `third_party/tinyusb`.
+Run `git submodule update --init --recursive` once after cloning this
+release repo before building the NXP example from source. (The Pico/pico_w
+examples reference these same submodules too, but building them from this
+release package is unsupported for a different, deeper reason — see Known
+Issue #12 below.)
 
 **POSIX (macOS arm64):**
 ```bash
@@ -442,15 +467,19 @@ cmake --build build_pico_host_evb -j6
     entirely rather than ship a console that can go dead with no indication.
     See `examples/midi_bridge/pico/README.md`'s Console section.
 
-12. **NXP FRDM-MCXN947: building the example from this release package is
-    currently unsupported.** `examples/midi_bridge/nxp/CMakeLists.txt` in
-    this distribution predates the current example's USB MIDI/TinyUSB
-    integration and DEVICE/HOST role option, and also targets an older,
-    incompatible NXP SDK driver layout (ENET_QOS/phyksz8081 vs. the current
-    example's plain ENET/phylan8741) — it will not compile against the
-    current `SessionTask.cpp`/`board_init.cpp`/`usb_descriptors.cpp`. Use
-    the pre-built `bin/nxp/mcxn947/nm2_nxp_mcxn947` binary (DEVICE role) for
-    now; build-from-source support will be ported in a future release.
+12. **Pico/pico_w: building the USB MIDI examples from this release package
+    is currently unsupported.** Unlike every other example in this
+    distribution, `examples/midi_bridge/pico/` and `pico_w/` compile
+    NetworkMIDI2's own core (`src/Protocol.cpp`, `NetworkMidiSession.cpp`,
+    etc.) from source rather than linking a pre-built library — and that
+    source is not included in this distribution (see "What's included"
+    above). Their `CMakeLists.txt` files are unmodified copies of the dev
+    repository's own build files, which is why they still reference
+    `${CMAKE_CURRENT_LIST_DIR}/../../../src/`. Use the pre-built
+    `bin/pico/w5500-evb-pico/{device,host}/nm2_bridge_pico.uf2` binaries
+    instead; build-from-source support (an IMPORTED-library release
+    template, same fix applied to the NXP example above) will be ported in
+    a future release.
 
 ---
 

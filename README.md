@@ -12,6 +12,7 @@ for embedded and desktop platforms. Developed by [AmeNote Inc.](https://amenote.
 | Pre-built static libraries | `lib/<platform>/` |
 | Pre-compiled example binaries | `bin/<platform>/` |
 | Example source code | `examples/midi_bridge/` |
+| USB MIDI third-party deps (git submodules, NXP example only) | `third_party/{tusb_ump,AM_MIDI2.0Lib,tinyusb}/` |
 | CMake `find_package()` support | `cmake/NetworkMidi2Config.cmake` |
 | Linux cross-compile toolchains | `cmake/toolchain-linux-*.cmake` |
 | NXP toolchain file | `cmake/toolchain-nxp-mcxn947.cmake` |
@@ -20,7 +21,10 @@ for embedded and desktop platforms. Developed by [AmeNote Inc.](https://amenote.
 | Porting guide | `docs/PORTING.md` |
 | Release notes | `RELEASE_NOTES.md` |
 
-Source code is proprietary and not included in this distribution.
+Source code is proprietary and not included in this distribution
+(`third_party/` above is public upstream code this repo depends on, not
+NetworkMIDI2's own source — run `git submodule update --init --recursive`
+once after cloning if you'll build the NXP example from source).
 
 ---
 

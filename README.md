@@ -251,6 +251,7 @@ session.beginClient(hostEp, 5005, &auth);
 | Pico (RP2040) + WIZnet W5500 Ethernet | `nm2_transport_lwip` | `lib/pico/rp2040-w5500/` — NOT interchangeable with `lib/pico/rp2040/`, different `lwipopts.h` |
 | Pico 2 W (RP2350, bare-metal) | `nm2_transport_lwip` | `lib/pico/rp2350/` |
 | Pico 2 W (RP2350, FreeRTOS) | `nm2_transport_lwip` | `lib/pico/rp2350-rtos/` |
+| Pico 2 W NetworkMIDI2 Bridge (WiFi, RP2350) | `nm2_transport_lwip` | `lib/pico/rp2350/` — reuses this library (identical `lwipopts.h`), no separate lib dir |
 | NXP FRDM-MCXN947 (Cortex-M33) | `nm2_transport_nxp` | `lib/nxp/mcxn947/` |
 
 Linux binaries are fully statically linked (musl libc) — no runtime
@@ -274,6 +275,8 @@ Ready-to-run example binaries are in `bin/<platform>/`:
 | `nm2_nxp_mcxn947` | NXP FRDM-MCXN947 FreeRTOS example — flash via pyocd (ELF) |
 | `w5500-evb-pico/device/nm2_bridge_pico.uf2` | W5500-EVB-Pico USB MIDI 2.0 <-> Ethernet bridge, DEVICE role — flash via BOOTSEL |
 | `w5500-evb-pico/host/nm2_bridge_pico.uf2` | W5500-EVB-Pico USB MIDI 2.0 <-> Ethernet bridge, HOST role — flash via BOOTSEL |
+| `pico2-w/device/nm2_bridge_pico_w.uf2` | Pico 2 W USB MIDI 2.0 <-> WiFi bridge, DEVICE role (build-time `NM2_BRIDGE_USB_ROLE=DEVICE`, the default) — flash via BOOTSEL |
+| `pico2-w/host/nm2_bridge_pico_w.uf2` | Pico 2 W USB MIDI 2.0 <-> WiFi bridge, HOST role (build-time `NM2_BRIDGE_USB_ROLE=HOST`) — flash via BOOTSEL |
 
 Example source code is in `examples/midi_bridge/` and can be built from
 scratch using the included CMakeLists.txt files against the pre-built libs.

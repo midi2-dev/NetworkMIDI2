@@ -47,39 +47,30 @@ is the MCU-Link virtual COM port (LPUART4, 115200 baud) for both roles — USB1
 is entirely committed to the MIDI interface. See
 `examples/midi_bridge/nxp/README.md` for full details.
 
-**Pico 2 W NetworkMIDI2 Bridge (WiFi) — DEVICE-role enumeration fixed, new
-USB HOST role added.** `examples/midi_bridge/pico_w/` bridges USB MIDI 2.0
-to a NetworkMIDI2 session over WiFi on a Pico 2 W (RP2350 + cyw43), reusing
-the W5500-EVB-Pico example's composite USB descriptors and (for HOST role)
-patched `hcd_rp2040.c` by path. Same `NM2_BRIDGE_USB_ROLE` (HOST/DEVICE,
-default DEVICE) build-time toggle as the other Pico/NXP examples.
+**New example: Pico 2 W NetworkMIDI2 Bridge (WiFi), both DEVICE and HOST
+roles, hardware-validated, with pre-built binaries.**
+`examples/midi_bridge/pico_w/` bridges USB MIDI 2.0 to a NetworkMIDI2
+session over WiFi on a Pico 2 W (RP2350 + cyw43), reusing the W5500-EVB-Pico
+example's composite USB descriptors by path (`../pico/usb_descriptors.cpp`,
+`../pico/device/tusb_config.h` — CDC console included for DEVICE role, see
+above). Same `NM2_BRIDGE_USB_ROLE` build-time role toggle as the
+W5500-EVB-Pico and NXP examples:
 
-The composite USB device (MIDI+CDC) previously did not enumerate on macOS
-on this board. That was suspected to be an unresolved upstream RP2350 +
-TinyUSB link-layout defect (`raspberrypi/pico-sdk#2216`) — a Beagle USB
-capture proved that suspicion wrong: `SET_ADDRESS` completed normally but
-the device never answered the host's next `GET_DESCRIPTOR`. Root cause was
-this target relying on `pico_stdio_usb`'s IRQ-driven background task to
-service `tud_task()` — an architecture never exercised elsewhere in this
-project, introduced alongside this RP2350 board for no reason connected to
-WiFi — racing against the blocking WiFi-connect call at boot and delaying
-the device-address hardware write past the host's next SETUP token. Fixed
-by pumping `tud_task()`/`tuh_task()` manually in one tight loop (same
-pattern as every other target) and switching WiFi connect to the
-non-blocking `cyw43_arch_wifi_connect_async()` API so that loop never
-stalls. Verified via `ioreg` on macOS: enumerates as `USBMidiNetworkBridge`,
-claimed by CoreMIDI's `MIDIServer`.
+- **DEVICE role** (`bin/pico/pico2-w/device/nm2_bridge_pico_w.uf2`, the
+  default) — presents as a USB MIDI 2.0 device to a host computer/DAW.
+- **HOST role** (`bin/pico/pico2-w/host/nm2_bridge_pico_w.uf2`) — the board
+  is itself the USB host, bridging a directly- or hub-attached USB MIDI
+  device. Same raw-pass-through limitation as the other HOST-role examples
+  (no UMP Stream discovery yet).
 
-**New: USB HOST role**, same shape as the Pico/NXP HOST roles (raw UMP
-pass-through, no Stream-message discovery yet) — hardware-validated
-end-to-end (USB MIDI keyboard -> Pico 2 W HOST -> NetworkMIDI2 over WiFi ->
-a real network client). Known issue: an intermittent TinyUSB host panic
-(`ep 80 was already available`) occurs on some boots, not correlated with
-device plug/unplug state; self-recovers via watchdog reset, not yet
-root-caused.
-
-Still source-only (no pre-built `.uf2`) — build from source per
-`examples/midi_bridge/pico_w/README.md`.
+The composite USB device's previously reported enumeration failure on macOS
+was root-caused: not an RP2350 silicon defect, but pico_w's own
+`cyw43_arch` WiFi-connect sequence blocking inside the IRQ-driven
+`tud_task()` call, racing the USB stack during enumeration. Fixed; both
+roles now enumerate reliably and are hardware-validated. This example
+reuses the existing `lib/pico/rp2350/` library (its `lwipopts.h` is
+byte-identical to the plain Pico 2 W lwIP example's) — there is no separate
+`lib/pico/pico2-w/` library directory.
 
 ---
 
@@ -246,6 +237,7 @@ Pre-built static libraries are provided in `lib/<platform>/`:
 | Pico W — RP2040 | `lib/pico/rp2040/` | Bare-metal lwIP |
 | Pico 2 W — RP2350 | `lib/pico/rp2350/` | Bare-metal lwIP |
 | Pico 2 W — RP2350 + FreeRTOS | `lib/pico/rp2350-rtos/` | FreeRTOS 11.1.0, threadsafe_background lwIP |
+| Pico 2 W NetworkMIDI2 Bridge — RP2350 | *(reuses `lib/pico/rp2350/`)* | Identical `lwipopts.h` to the plain Pico 2 W lwIP example; no separate library |
 | NXP FRDM-MCXN947 (Cortex-M33) | `lib/nxp/mcxn947/` | FreeRTOS + lwIP (NO_SYS=0, ENET_QOS) |
 
 Linux libraries are compiled with musl libc (`-static`) and carry no
@@ -326,6 +318,22 @@ while running to re-enter setup. **HOST role** additionally requires the
 board's own 5V rail wired onto its USB connector's VBUS pin so a downstream
 USB device can enumerate — see `examples/midi_bridge/pico/README.md`'s "USB
 host power (VBUS)" section.
+
+### Pico 2 W NetworkMIDI2 Bridge Example (`bin/pico/pico2-w/`, source: `examples/midi_bridge/pico_w/`)
+
+| Binary | Description |
+|---|---|
+| `bin/pico/pico2-w/device/nm2_bridge_pico_w.uf2` | Presents as a USB MIDI 2.0 device to a host computer/DAW |
+| `bin/pico/pico2-w/host/nm2_bridge_pico_w.uf2` | Pico 2 W is the USB host; bridges a directly-/hub-attached USB MIDI device |
+
+Requires a Pico 2 W (RP2350 + cyw43 WiFi). Flash by holding BOOTSEL and
+dragging the `.uf2` file onto the board's USB mass-storage drive. DEVICE
+role has a USB CDC console alongside the MIDI function; HOST role is
+UART-only (USB port is occupied being the host port). The boot-time setup
+menu prompts for WiFi credentials (saved to flash after first entry), bridge
+role (Host or Client), device name, and DHCP vs. static IP; press ESC any
+time while running to re-enter setup. See
+`examples/midi_bridge/pico_w/README.md` for full details.
 
 ### Building Examples from Source
 
@@ -410,15 +418,26 @@ cmake --build build_pico_host_evb -j6
 # Flash: build_pico_host_evb/nm2_bridge_pico.uf2
 ```
 
-**Pico 2 W WiFi NetworkMIDI2 Bridge (pico_w, experimental)** (needs
-submodules too; see Known Issue #13 for its unresolved USB enumeration bug):
+**Pico 2 W WiFi NetworkMIDI2 Bridge (pico_w)** (needs submodules too; links
+`lib/pico/rp2350/`, same as the plain Pico 2 W lwIP example):
 ```bash
-cmake -B build_pico2w \
+# DEVICE role:
+cmake -B build_pico2w_device \
       -DPICO_SDK_PATH=~/.pico-sdk/sdk/2.3.0 \
       -DPICO_BOARD=pico2_w \
+      -DNM2_BRIDGE_USB_ROLE=DEVICE \
       examples/midi_bridge/pico_w
-cmake --build build_pico2w -j6
-# Flash: build_pico2w/nm2_bridge_pico_w.uf2
+cmake --build build_pico2w_device -j6
+# Flash: build_pico2w_device/nm2_bridge_pico_w.uf2
+
+# HOST role:
+cmake -B build_pico2w_host \
+      -DPICO_SDK_PATH=~/.pico-sdk/sdk/2.3.0 \
+      -DPICO_BOARD=pico2_w \
+      -DNM2_BRIDGE_USB_ROLE=HOST \
+      examples/midi_bridge/pico_w
+cmake --build build_pico2w_host -j6
+# Flash: build_pico2w_host/nm2_bridge_pico_w.uf2
 ```
 
 **Pico 2 W FreeRTOS:**
@@ -521,19 +540,6 @@ cmake --build build_pico_host_evb -j6
     after the host reconnected to the CDC tty — pulled from the descriptor
     entirely rather than ship a console that can go dead with no indication.
     See `examples/midi_bridge/pico/README.md`'s Console section.
-
-13. ~~pico_w: composite USB device (MIDI+CDC) does not enumerate on macOS
-    on RP2350 (Pico 2 W).~~ **Fixed** — see the v0.2.5 entry above. Root
-    cause was this target's own service architecture (IRQ-driven
-    `tud_task()` racing blocking WiFi connect), not an RP2350/TinyUSB
-    silicon defect as originally suspected.
-
-14. **pico_w HOST role: intermittent TinyUSB host panic.** `*** PANIC ***
-    ep 80 was already available` occurs on some boots, not correlated with
-    USB device plug/unplug state (reproduces even with nothing attached).
-    Self-recovers via watchdog reset into a working state on the next
-    boot — not a hard hang, but not yet root-caused. See
-    `examples/midi_bridge/pico_w/README.md`'s Known issues.
 
 ---
 

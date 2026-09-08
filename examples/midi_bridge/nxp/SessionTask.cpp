@@ -863,6 +863,15 @@ static void handleLine(const char *line)
                 break;
             }
         }
+        // 'm'/'M' as a whole line (this state is fully line-buffered -- see
+        // processCli() -- so unlike a raw single-char check there's no risk
+        // of a trailing Enter leaking into the next prompt) matches the
+        // "'m' + Enter to enter a host IP manually" text printed above.
+        if (line[0] == 'm' || line[0] == 'M') {
+            printf("Host IP: ");
+            gState = AppState::CLIENT_IP;
+            break;
+        }
         if (!blank) {
             printf("Select host [1-%d]: ", gFoundCount);
             break;

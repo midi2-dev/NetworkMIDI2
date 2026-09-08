@@ -47,19 +47,39 @@ is the MCU-Link virtual COM port (LPUART4, 115200 baud) for both roles — USB1
 is entirely committed to the MIDI interface. See
 `examples/midi_bridge/nxp/README.md` for full details.
 
-**New (experimental) example: Pico 2 W NetworkMIDI2 Bridge (WiFi, source
-only — no pre-built binary yet).** `examples/midi_bridge/pico_w/` bridges USB
-MIDI 2.0 to a NetworkMIDI2 session over WiFi on a Pico 2 W (RP2350 + cyw43),
-reusing the W5500-EVB-Pico example's composite USB descriptors by path
-(`../pico/usb_descriptors.cpp`, `../pico/device/tusb_config.h` — CDC console
-included, see above). **Known issue, unresolved:** the composite USB device
-does not currently enumerate on macOS on this board — isolated to a
-link-layout-sensitive RP2350 defect tracked upstream at
-`raspberrypi/pico-sdk#2216`, not a bug in this project's descriptors or
-config. UART console, config menu, and WiFi setup all work; only USB device
-enumeration is affected. No pre-built `.uf2` is shipped for this example
-yet — build from source per `examples/midi_bridge/pico_w/README.md` if you
-want to track the upstream fix.
+**Pico 2 W NetworkMIDI2 Bridge (WiFi) — DEVICE-role enumeration fixed, new
+USB HOST role added.** `examples/midi_bridge/pico_w/` bridges USB MIDI 2.0
+to a NetworkMIDI2 session over WiFi on a Pico 2 W (RP2350 + cyw43), reusing
+the W5500-EVB-Pico example's composite USB descriptors and (for HOST role)
+patched `hcd_rp2040.c` by path. Same `NM2_BRIDGE_USB_ROLE` (HOST/DEVICE,
+default DEVICE) build-time toggle as the other Pico/NXP examples.
+
+The composite USB device (MIDI+CDC) previously did not enumerate on macOS
+on this board. That was suspected to be an unresolved upstream RP2350 +
+TinyUSB link-layout defect (`raspberrypi/pico-sdk#2216`) — a Beagle USB
+capture proved that suspicion wrong: `SET_ADDRESS` completed normally but
+the device never answered the host's next `GET_DESCRIPTOR`. Root cause was
+this target relying on `pico_stdio_usb`'s IRQ-driven background task to
+service `tud_task()` — an architecture never exercised elsewhere in this
+project, introduced alongside this RP2350 board for no reason connected to
+WiFi — racing against the blocking WiFi-connect call at boot and delaying
+the device-address hardware write past the host's next SETUP token. Fixed
+by pumping `tud_task()`/`tuh_task()` manually in one tight loop (same
+pattern as every other target) and switching WiFi connect to the
+non-blocking `cyw43_arch_wifi_connect_async()` API so that loop never
+stalls. Verified via `ioreg` on macOS: enumerates as `USBMidiNetworkBridge`,
+claimed by CoreMIDI's `MIDIServer`.
+
+**New: USB HOST role**, same shape as the Pico/NXP HOST roles (raw UMP
+pass-through, no Stream-message discovery yet) — hardware-validated
+end-to-end (USB MIDI keyboard -> Pico 2 W HOST -> NetworkMIDI2 over WiFi ->
+a real network client). Known issue: an intermittent TinyUSB host panic
+(`ep 80 was already available`) occurs on some boots, not correlated with
+device plug/unplug state; self-recovers via watchdog reset, not yet
+root-caused.
+
+Still source-only (no pre-built `.uf2`) — build from source per
+`examples/midi_bridge/pico_w/README.md`.
 
 ---
 
@@ -502,16 +522,18 @@ cmake --build build_pico_host_evb -j6
     entirely rather than ship a console that can go dead with no indication.
     See `examples/midi_bridge/pico/README.md`'s Console section.
 
-13. **pico_w: composite USB device (MIDI+CDC) does not enumerate on macOS
-    on RP2350 (Pico 2 W).** Confirmed via extensive isolation this is not a
-    bug in this project's descriptors, tusb_ump, board/CMake config, or the
-    `tusb_init()` API used — it reproduces with 100% stock TinyUSB
-    descriptors/class driver too, and matches the class of bug tracked
-    upstream at `raspberrypi/pico-sdk#2216` (link-layout-sensitive, open,
-    milestone 2.4.0). UART console, config menu, and WiFi setup all work
-    correctly; only USB device enumeration is affected. Revisit once
-    pico-sdk 2.4.0 ships. This example is experimental/preview for that
-    reason — no pre-built binary is shipped for it.
+13. ~~pico_w: composite USB device (MIDI+CDC) does not enumerate on macOS
+    on RP2350 (Pico 2 W).~~ **Fixed** — see the v0.2.5 entry above. Root
+    cause was this target's own service architecture (IRQ-driven
+    `tud_task()` racing blocking WiFi connect), not an RP2350/TinyUSB
+    silicon defect as originally suspected.
+
+14. **pico_w HOST role: intermittent TinyUSB host panic.** `*** PANIC ***
+    ep 80 was already available` occurs on some boots, not correlated with
+    USB device plug/unplug state (reproduces even with nothing attached).
+    Self-recovers via watchdog reset into a working state on the next
+    boot — not a hard hang, but not yet root-caused. See
+    `examples/midi_bridge/pico_w/README.md`'s Known issues.
 
 ---
 

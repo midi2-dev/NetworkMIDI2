@@ -1,10 +1,26 @@
 //
 // NetworkMIDI2 <-> USB MIDI 2.0 bridge for Pico 2 W (RP2350 + cyw43 WiFi).
 //
-// USB DEVICE role only (the bridge presents as a USB MIDI 2.0 device to a
-// host computer/DAW, answering Endpoint/Function Block Discovery locally,
-// same as examples/midi_bridge/pico's DEVICE role) -- there is no USB HOST
-// role for this target.
+// Two USB roles, selected at build time via NM2_BRIDGE_USB_ROLE (see
+// CMakeLists.txt) -- same split and rationale as examples/midi_bridge/pico:
+//   DEVICE (default) -- the bridge presents as a USB MIDI 2.0 device to a
+//     host computer/DAW, answering Endpoint/Function Block Discovery
+//     locally. Composite MIDI 2.0 (UMP) + CDC (usb_descriptors.cpp, shared
+//     as-is with examples/midi_bridge/pico -- board-agnostic, no behavior
+//     change to that target). CDC gives a console on boards with no
+//     Picoprobe/debug UART wired up. Pico 2 W's RP2350 USB controller is
+//     Full-Speed, same as the RP2040 Pico -- the composite CDC+MIDI crash
+//     investigated on the NXP FRDM-MCXN947 board was specific to that
+//     board's High-Speed USB controller (see examples/midi_bridge/nxp/
+//     README.md); it does not apply here.
+//   HOST -- the bridge is itself the USB host, bridging to a directly- or
+//     hub-attached USB MIDI device via the tusb_ump Host driver, same as
+//     examples/midi_bridge/pico's HOST role (raw UMP pass-through in both
+//     directions, no discovery handling -- see that file's header comment).
+//     USB port is then occupied being the host port, so the console is
+//     UART-only (no CDC).
+// NM2_BRIDGE_USB_HOST (0 or 1, set by CMakeLists.txt from that option)
+// selects between the two throughout this file.
 //
 // Transport is WiFi/lwIP (NO_SYS=1 polling, pico_cyw43_arch_lwip_poll).
 // Role, device name, and WiFi SSID/password are runtime configuration
@@ -12,14 +28,6 @@
 // from examples/midi_bridge/pico's, not shared, so that target cannot
 // regress), persisted to flash and editable via the boot-time setup menu,
 // same UX pattern as examples/midi_bridge/pico.
-//
-// USB is composite MIDI 2.0 (UMP) + CDC (usb_descriptors.cpp, shared as-is
-// with examples/midi_bridge/pico -- board-agnostic, no behavior change to
-// that target). CDC gives a console on boards with no Picoprobe/debug UART
-// wired up. Pico 2 W's RP2350 USB controller is Full-Speed, same as the
-// RP2040 Pico -- the composite CDC+MIDI crash investigated on the NXP
-// FRDM-MCXN947 board was specific to that board's High-Speed USB controller
-// (see examples/midi_bridge/nxp/README.md); it does not apply here.
 //
 
 #include <cstring>
@@ -42,9 +50,14 @@
 #include "console_menu.h"
 
 #include "tusb.h"
+#if NM2_BRIDGE_USB_HOST
+#include "host/hcd.h"
+#include "ump_host.h"
+#else
 #include "ump_device.h"
 #include "include/umpProcessor.h"
 #include "include/umpMessageCreate.h"
+#endif
 
 using namespace networkmidi2;
 
@@ -72,7 +85,65 @@ constexpr int kReconfigureKey = 0x1B; // ESC
 static BridgeConfig       gBridgeConfig;
 static LwipUdpTransport   nm2Transport;
 static NetworkMidiSession *nm2Session = nullptr;
-static umpProcessor        UMPHandler;
+
+#if NM2_BRIDGE_USB_HOST
+// ---------------------------------------------------------------------------
+// HOST role: track the single currently-mounted USB MIDI device. Identical
+// shape to examples/midi_bridge/pico's HOST role -- see that file's comment
+// on why this assumes one downstream device at a time.
+// ---------------------------------------------------------------------------
+static bool    s_usbHostMounted = false;
+static uint8_t s_usbHostDaddr   = 0;
+static uint8_t s_usbHostItfNum  = 0;
+
+void tuh_ump_mount_cb(uint8_t daddr, uint8_t itf_num) {
+    printf("[%llu] USB HOST: UMP device mounted daddr=%u itf_num=%u\n", time_us_64(), daddr, itf_num);
+    s_usbHostMounted = true;
+    s_usbHostDaddr   = daddr;
+    s_usbHostItfNum  = itf_num;
+}
+
+void tuh_ump_umount_cb(uint8_t daddr, uint8_t itf_num) {
+    printf("[%llu] USB HOST: UMP device unmounted daddr=%u itf_num=%u\n", time_us_64(), daddr, itf_num);
+    if (s_usbHostMounted && s_usbHostDaddr == daddr && s_usbHostItfNum == itf_num) {
+        s_usbHostMounted = false;
+    }
+}
+
+#else // DEVICE role (original behavior)
+
+#include "hardware/structs/usb.h"
+
+static umpProcessor UMPHandler;
+
+extern "C" void tud_mount_cb(void) { printf("[USB] tud_mount_cb -- configured\n"); }
+extern "C" void tud_umount_cb(void) { printf("[USB] tud_umount_cb -- unconfigured\n"); }
+
+// 'u' on the console while running: dump the USB device controller's state.
+// Bench diagnostic for the RP2350 enumeration failure (see CMakeLists.txt's
+// known-issue comment). The RP2350-only registers are the informative ones:
+// SM_STATE says whether the device FSM is wedged, EP_RX/TX_ERROR what the
+// SIE has been seeing, DEV_ADDR_CTRL whether SET_ADDRESS was ever reached.
+static void dumpUsbDeviceRegs() {
+    printf("[USB] tud: inited=%d connected=%d mounted=%d suspended=%d\n",
+           tud_inited(), tud_connected(), tud_mounted(), tud_suspended());
+    printf("[USB] main_ctrl=%08lx sie_ctrl=%08lx sie_status=%08lx muxing=%08lx pwr=%08lx\n",
+           (unsigned long) usb_hw->main_ctrl, (unsigned long) usb_hw->sie_ctrl,
+           (unsigned long) usb_hw->sie_status, (unsigned long) usb_hw->muxing,
+           (unsigned long) usb_hw->pwr);
+    printf("[USB] dev_addr_ctrl=%08lx buf_status=%08lx inte=%08lx ints=%08lx sof=%lu\n",
+           (unsigned long) usb_hw->dev_addr_ctrl, (unsigned long) usb_hw->buf_status,
+           (unsigned long) usb_hw->inte, (unsigned long) usb_hw->ints,
+           (unsigned long) (usb_hw->sof_rd & 0x7FF));
+#if PICO_RP2350
+    printf("[USB] sm_state=%08lx ep_tx_error=%08lx ep_rx_error=%08lx linestate_tuning=%08lx dev_sm_watchdog=%08lx\n",
+           (unsigned long) usb_hw->sm_state, (unsigned long) usb_hw->ep_tx_error,
+           (unsigned long) usb_hw->ep_rx_error, (unsigned long) usb_hw->linestate_tuning,
+           (unsigned long) usb_hw->dev_sm_watchdog);
+#endif
+    printf("[USB] ep0 buf_ctrl in=%08lx out=%08lx\n",
+           (unsigned long) usb_dpram->ep_buf_ctrl[0].in, (unsigned long) usb_dpram->ep_buf_ctrl[0].out);
+}
 
 // ---------------------------------------------------------------------------
 // USB MIDI 2.0 Endpoint / Function Block Discovery replies (DEVICE role) --
@@ -124,13 +195,19 @@ static void functionblock(uint8_t fbIdx, uint8_t filter) {
         tud_ump_write_hton(0, UMP.data(), 4);
     }
 }
+#endif // NM2_BRIDGE_USB_HOST
 
 // Called synchronously from within nm2Session->tick() for each UMP message
 // received over the network -- non-blocking FIFO write, must not call
 // sendUmp()/close() from here (see NetworkMidiSession's docs).
 static void onNetworkUmp(void *ctx, const uint32_t *words, size_t wordCount) {
     (void) ctx;
+#if NM2_BRIDGE_USB_HOST
+    if (!s_usbHostMounted) return; // no downstream USB MIDI device yet
+    tuh_ump_write_hton(s_usbHostDaddr, s_usbHostItfNum, const_cast<uint32_t *>(words), (uint8_t) wordCount);
+#else
     tud_ump_write_hton(0, const_cast<uint32_t *>(words), (uint8_t) wordCount);
+#endif
 }
 
 static void onNetworkStateChange(void *ctx, SessionState newState) {
@@ -142,10 +219,30 @@ static void onNetworkStateChange(void *ctx, SessionState newState) {
     printf("[%llu] NM2 session state -> %s\n", time_us_64(), kStateNames[(int) newState]);
 }
 
+// Pumps the USB stack -- unconditional, every call, regardless of what else
+// is going on. This is the same tight-loop pattern examples/midi_bridge/pico
+// already uses for tud_task()/tuh_task() (that target disables
+// pico_stdio_usb's IRQ-background task and pumps manually for exactly this
+// reason). Forward-declared here so wifi_connect() below can keep USB
+// serviced during its own (bounded, non-blocking-per-iteration) wait --
+// previously wifi_connect() used the blocking cyw43_arch_wifi_connect_timeout_ms()
+// helper and USB enumeration relied entirely on pico_stdio_usb's low-priority
+// background IRQ to keep running underneath it. That introduced an untested
+// combination for this codebase (IRQ-driven tud_task() servicing a composite
+// MIDI+CDC device) at the same time as the move to this RP2350 board, on top
+// of the actual WiFi change -- two variables changed together for no reason
+// tied to WiFi itself. Pumping tud_task() explicitly here removes that
+// confound and matches every other target in this project.
+static void usb_task_tick();
+
 // ---------------------------------------------------------------------------
-// WiFi bring-up -- blocking connect with retry, using the runtime-configured
-// SSID/password (bridge_config.h) instead of build-time NM2_WIFI_SSID/
-// NM2_WIFI_PASSWORD cache vars.
+// WiFi bring-up -- non-blocking connect with retry, using the runtime-
+// configured SSID/password (bridge_config.h) instead of build-time
+// NM2_WIFI_SSID/NM2_WIFI_PASSWORD cache vars. Uses cyw43_arch_wifi_connect_
+// async() + a locally-pumped poll loop (same shape as the SDK's own blocking
+// cyw43_arch_wifi_connect_until(), see cyw43_arch.c) instead of the blocking
+// cyw43_arch_wifi_connect_timeout_ms() wrapper, specifically so usb_task_tick()
+// keeps running throughout the connect/retry window.
 // ---------------------------------------------------------------------------
 static bool wifi_connect(const BridgeConfig &cfg) {
     if (cyw43_arch_init() != 0) {
@@ -155,51 +252,79 @@ static bool wifi_connect(const BridgeConfig &cfg) {
     cyw43_arch_enable_sta_mode();
 
     printf("Connecting to WiFi SSID \"%s\"...\n", cfg.wifiSsid);
-    int r = -1;
-    for (int attempt = 1; attempt <= 3 && r != 0; ++attempt) {
-        if (attempt > 1) {
-            printf("  Retry %d/3...\n", attempt);
-            sleep_ms(1500);
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        if (attempt > 1) printf("  Retry %d/3...\n", attempt);
+
+        int err = cyw43_arch_wifi_connect_async(cfg.wifiSsid, cfg.wifiPassword, CYW43_AUTH_WPA2_AES_PSK);
+        if (err) {
+            printf("[err] WiFi connect_async failed (code %d)\n", err);
+            continue;
         }
-        r = cyw43_arch_wifi_connect_timeout_ms(
-                cfg.wifiSsid, cfg.wifiPassword, CYW43_AUTH_WPA2_AES_PSK, 15000);
+
+        absolute_time_t deadline = make_timeout_time_ms(15000);
+        int status = CYW43_LINK_UP + 1;
+        while (status >= 0 && status != CYW43_LINK_UP &&
+               absolute_time_diff_us(get_absolute_time(), deadline) > 0) {
+            usb_task_tick();
+            cyw43_arch_poll();
+            int newStatus = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+            if (newStatus == CYW43_LINK_NONET) {
+                // No matching SSID seen yet -- keep trying within this same attempt.
+                err = cyw43_arch_wifi_connect_async(cfg.wifiSsid, cfg.wifiPassword, CYW43_AUTH_WPA2_AES_PSK);
+                if (err) break;
+                newStatus = CYW43_LINK_JOIN;
+            }
+            status = newStatus;
+        }
+
+        if (status == CYW43_LINK_UP) {
+            printf("WiFi connected. IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_default)));
+            return true;
+        }
     }
-    if (r != 0) {
-        printf("[err] WiFi connect failed after 3 attempts (code %d)\n", r);
-        cyw43_arch_deinit();
-        return false;
-    }
-    printf("WiFi connected. IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_default)));
-    return true;
+    printf("[err] WiFi connect failed after 3 attempts\n");
+    cyw43_arch_deinit();
+    return false;
 }
 
-// Passed to setConsolePump()/runClientHostSelect(): keeps (once WiFi is up)
-// cyw43_arch/lwIP timers serviced while the boot-time menus wait for input.
-// Does NOT call tud_task() -- pico_enable_stdio_usb(...1) is on for this
-// target (see CMakeLists.txt), which installs its own low-priority
-// background IRQ that already owns tud_task() for the whole process
-// lifetime, starting at stdio_init_all() (before WiFi connect or any menu
-// runs). TinyUSB's core loop is not reentrant against IRQ-context
-// preemption, so a second, manual tud_task() call from here (or from the
-// main run loop below) racing that IRQ is unsafe -- same reasoning as
-// examples/midi_bridge/pico's DEVICE role, which never polls tud_task()
-// manually either.
+// Passed to runClientHostSelect(): keeps (once WiFi is up) cyw43_arch/lwIP
+// timers serviced while the boot-time host-select menu waits for input.
 static bool gWifiPollReady = false;
-static void usb_and_net_pump() {
+static void net_pump() {
     if (gWifiPollReady) {
         cyw43_arch_poll();
         sys_check_timeouts();
     }
 }
 
+// Pumps the USB stack -- tuh_task() for HOST role, tud_task() for DEVICE
+// role. Unconditional, every call, same shape as examples/midi_bridge/pico.
+// DEVICE role also disables pico_stdio_usb's IRQ-background task (see
+// CMakeLists.txt's PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=0) so this is
+// the ONLY caller of tud_task() -- no second, IRQ-context caller to race.
+static void usb_task_tick() {
+#if NM2_BRIDGE_USB_HOST
+    tuh_task();
+#else
+    tud_task();
+#endif
+}
+
+// Passed to setConsolePump(): keeps USB (and, once up, WiFi/lwIP) serviced
+// while the boot-time menus wait for input.
+static void usb_and_net_pump() {
+    usb_task_tick();
+    net_pump();
+}
+
 int main() {
+#if !NM2_BRIDGE_USB_HOST
     // USB first, matching examples/midi_bridge/pico's DEVICE role -- the D+
-    // pull-up is only asserted once tusb_init() runs. tud_task() itself is
-    // never called manually anywhere in this file; once stdio_init_all()
-    // below runs (pico_enable_stdio_usb is on for this target), its
-    // background IRQ owns tud_task() exclusively for the rest of the
-    // process lifetime, including while WiFi connect or the setup menu are
-    // blocking main().
+    // pull-up is only asserted once tusb_init() runs. tud_task() is pumped
+    // manually via usb_task_tick() (setConsolePump() below, and the main run
+    // loop) -- pico_stdio_usb's own IRQ-background task is disabled for this
+    // role (PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=0, see CMakeLists.txt)
+    // so there is exactly one caller, matching every other target here.
     UMPHandler.setMidiEndpoint(midiendpoint);
     UMPHandler.setFunctionBlock(functionblock);
     tusb_init();
@@ -212,11 +337,30 @@ int main() {
     tud_disconnect();
     sleep_ms(250);
     tud_connect();
+#endif
 
     stdio_init_all();
-    setConsolePump(usb_and_net_pump);
 
-    printf("\r\nStarting NetworkMIDI2 Bridge (Pico 2 W, USB DEVICE role)\n");
+    printf("\r\nStarting NetworkMIDI2 Bridge (Pico 2 W, USB %s role)\n",
+           NM2_BRIDGE_USB_HOST ? "HOST" : "DEVICE");
+
+#if NM2_BRIDGE_USB_HOST
+    tusb_rhport_init_t host_init = {};
+    host_init.role  = TUSB_ROLE_HOST;
+    host_init.speed = TUSB_SPEED_AUTO;
+    tusb_init(BOARD_TUH_RHPORT, &host_init);
+
+    // RP2350's host controller only notifies TinyUSB of a device via an
+    // edge-triggered connect interrupt -- if a device was already plugged in
+    // before tusb_init() ran, there's no edge to catch and it's silently
+    // never enumerated. Same workaround as examples/midi_bridge/pico's HOST
+    // role.
+    if (hcd_port_connect_status(BOARD_TUH_RHPORT)) {
+        printf("USB device already attached at boot -- forcing enumeration\n");
+        hcd_event_device_attach(BOARD_TUH_RHPORT, false);
+    }
+#endif
+    setConsolePump(usb_and_net_pump);
 
     loadBridgeConfig(gBridgeConfig);
     bool enteredSetup = runConfigMenu(gBridgeConfig);
@@ -270,14 +414,14 @@ int main() {
         bool haveClientHost = gBridgeConfig.clientHostIp[0] != '\0';
         if (networkUp && gBridgeConfig.role == BridgeRole::Client &&
             (enteredSetup || !haveClientHost)) {
-            haveClientHost = runClientHostSelect(gBridgeConfig, mdnsDisc, usb_and_net_pump,
+            haveClientHost = runClientHostSelect(gBridgeConfig, mdnsDisc, net_pump,
                                                   LwipMdnsDiscovery::isNetifReady, enteredSetup);
         }
 
         bool sessionStarted = true;
 
         if (!networkUp) {
-            printf("No WiFi -- running as a USB MIDI device only.\n");
+            printf("No WiFi -- running with USB %s only.\n", NM2_BRIDGE_USB_HOST ? "HOST" : "MIDI device");
             sessionStarted = false;
         } else if (gBridgeConfig.role == BridgeRole::Client && !haveClientHost) {
             printf("Client role with no host configured -- not starting a session.\n"
@@ -297,20 +441,42 @@ int main() {
 
         printf("Bridge running. Press ESC at any time to re-enter setup.\n");
 
-        // ------- Loop: pump (if up) WiFi/lwIP + the NM2 session -------
-        // tud_task() is not called here -- see usb_and_net_pump()'s comment.
+        // ------- Loop: pump USB, WiFi/lwIP, and the NM2 session -------
         while (true) {
-            if (getchar_timeout_us(0) == kReconfigureKey) {
+            usb_task_tick();
+
+            int key = getchar_timeout_us(0);
+            if (key == kReconfigureKey) {
                 printf("ESC pressed -- re-entering setup...\n");
                 if (sessionStarted) nm2Session->close();
                 break;
             }
+#if !NM2_BRIDGE_USB_HOST
+            if (key == 'u' || key == 'U') dumpUsbDeviceRegs();
+#endif
 
             if (networkUp) {
                 cyw43_arch_poll();
                 sys_check_timeouts();
             }
 
+#if NM2_BRIDGE_USB_HOST
+            // USB -> Network: pull decoded UMP words from the attached USB
+            // MIDI device and forward each into the NetworkMIDI2 session's
+            // TX FIFO. No Endpoint/Function Block Discovery handling here --
+            // raw pass-through, same as examples/midi_bridge/pico's HOST role.
+            if (s_usbHostMounted) {
+                uint32_t UMPpacket[4];
+                uint16_t umpCount = tuh_ump_read_ntoh(s_usbHostDaddr, s_usbHostItfNum, UMPpacket, 4);
+                if (umpCount && sessionStarted) {
+                    if (!nm2Session->sendUmp(UMPpacket, umpCount)) {
+                        printf("[%llu] NM2 sendUmp dropped %u word(s) "
+                               "(FIFO full or session not established)\n",
+                               time_us_64(), umpCount);
+                    }
+                }
+            }
+#else
             // USB -> Network: drain tusb_ump and forward each UMP message.
             if (tud_ump_n_mounted(0) && tud_ump_n_available(0)) {
                 uint32_t UMPpacket[4];
@@ -331,6 +497,7 @@ int main() {
                     }
                 }
             }
+#endif
 
             // Network -> USB happens inside tick() via onNetworkUmp() above.
             if (sessionStarted) nm2Session->tick();

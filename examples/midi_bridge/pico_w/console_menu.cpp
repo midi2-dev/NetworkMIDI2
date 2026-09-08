@@ -196,9 +196,10 @@ bool runClientHostSelect(BridgeConfig &cfg, IDiscovery &disc,
     disc.browse();
 
     DiscoveredPeer hosts[kMaxListedHosts];
-    unsigned       hostCount = 0;
-    bool           manual    = false;
-    bool           sawInput  = interactive; // did anyone answer the console?
+    unsigned       hostCount     = 0;
+    bool           manual        = false;
+    bool           manualPending = false; // saw 'm'/'M', now waiting for its Enter
+    bool           sawInput      = interactive; // did anyone answer the console?
 
     absolute_time_t deadline = make_timeout_time_ms(kHostBrowseMs);
     while (absolute_time_diff_us(get_absolute_time(), deadline) > 0) {
@@ -219,17 +220,35 @@ bool runClientHostSelect(BridgeConfig &cfg, IDiscovery &disc,
         // Poll rather than waiting 50ms per iteration: the loop body has to
         // get back to pumpTick() promptly or USB enumeration stalls here.
         int c = getchar_timeout_us(0);
+        if (manualPending) {
+            // Already saw 'm'/'M' -- the prompt reads "'m' + Enter", so wait
+            // for that Enter (ignoring anything else typed meanwhile) before
+            // switching prompts. Acting on 'm' alone left its Enter keystroke
+            // to arrive after we'd already moved on to the "Host IP" prompt,
+            // where readLine() silently took it as a blank line and fell
+            // back to the default IP -- corrupting manual entry every time.
+            if (c == '\r' || c == '\n') {
+                sawInput = true;
+                manual   = true;
+                break;
+            }
+            continue;
+        }
         if (c == '\r' || c == '\n') {
             sawInput = true;
             break;
         }
         if (c == 'm' || c == 'M') {
-            sawInput = true;
-            manual    = true;
-            break;
+            sawInput      = true;
+            manualPending = true;
         }
     }
     disc.stopBrowse();
+
+    // The window can close while still waiting for the Enter after a typed
+    // 'm' (e.g. right at the deadline) -- honor the already-unambiguous 'm'
+    // rather than falling through to the auto-select/no-hosts handling below.
+    if (manualPending) manual = true;
 
     if (!manual && hostCount == 0) {
         // Nothing on the wire and nobody typing: unattended boot. Prompting

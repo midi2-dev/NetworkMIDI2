@@ -11,6 +11,12 @@ Three programs cover the full example suite:
 The source files are written as an **integration tutorial** — every significant
 line is explained in comments.  Start here if you're porting to a new platform.
 
+**macOS setup walkthrough:** see [`docs/Network_MIDI2_Mac_Setup_Guide.pdf`](docs/Network_MIDI2_Mac_Setup_Guide.pdf)
+(source: [`docs/Network_MIDI2_Mac_Setup_Guide.docx`](docs/Network_MIDI2_Mac_Setup_Guide.docx)).
+
+**Windows setup walkthrough:** see [`docs/Network_MIDI2_Windows_Setup_Guide.pdf`](docs/Network_MIDI2_Windows_Setup_Guide.pdf)
+(source: [`docs/Network_MIDI2_Windows_Setup_Guide.docx`](docs/Network_MIDI2_Windows_Setup_Guide.docx)).
+
 ---
 
 ## Build

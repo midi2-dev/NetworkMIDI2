@@ -105,7 +105,7 @@
 // narrowed to a single directly-attached device, since a bridge deployment
 // may reasonably sit behind a hub too. See that file's comments and
 // UUT/USB_Host_UMP_Test/README.md's Known Issues for the current
-// hub-support caveats (in particular: OAKTONE Oakboard Mini fails to
+// hub-support caveats (in particular: one USB MIDI 2.0 keyboard fails to
 // enumerate through any hub).
 #define CFG_TUH_HUB                 3
 #define CFG_TUH_DEVICE_MAX          10
@@ -119,8 +119,25 @@
 // enumeration shape, not a functional loss for this driver).
 // #define CFG_TUH_MIDI             1
 
-#define CFG_TUH_UMP                 20
+// The bridge forwards one UMP device (main.cpp tracks a single mount); a few
+// spare slots cover a hub with more than one attached. Each slot carries its
+// own TX/RX FIFOs below, so the count is what pays for their size.
+#define CFG_TUH_UMP                 4
 #define CFG_TUH_UMP_MAX_GTB         8
+
+// Per-interface FIFOs. ump_host.h defaults both to one endpoint packet -- 64
+// bytes at full speed -- which cannot hold one ten-note MIDI 2.0 chord (80
+// bytes): the bridge dropped part of every large chord network -> USB ("USB
+// TX FIFO full", ~90-100 messages/s in a two-hand chord test) however fast USB
+// drained. RX holds four packets.
+//
+// TX must hold one whole large SysEx: the network delivers it in one go, and
+// the FIFO drains only between USB transfers. 1 KB of SysEx7 is 1368 bytes of
+// UMP and 4 KB is 5464, so the old 1024 dropped every SysEx of 1 KB or more
+// (0% delivered network -> USB). 8 KB x 4 slots is ~34 KB, about 8 KB more
+// than the old 1 KB x 20.
+#define CFG_TUH_UMP_TX_BUFSIZE      8192
+#define CFG_TUH_UMP_RX_BUFSIZE      256
 
 #ifdef __cplusplus
  }

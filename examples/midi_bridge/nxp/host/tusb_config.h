@@ -143,7 +143,19 @@
 // this driver).
 // #define CFG_TUH_MIDI             1
 
-#define CFG_TUH_UMP                 20
+// One ump_interface_t is allocated per instance and each carries its own RX/TX
+// FIFOs and GTB table: 20 instances cost 56320 bytes of SRAM, which took this
+// build to 96.32% of the 384 KB SRAM region. It linked, but at runtime the
+// counters began reporting impossible values (udp.rx 1229211981 drop 16778495
+// on a counter that had read 0 the print before) and the firmware then stopped
+// executing altogether, dropping the network session -- classic memory
+// exhaustion, not a network fault.
+//
+// 20 was never reachable in the first place: CFG_TUH_DEVICE_MAX is 2 and
+// CFG_TUH_HUB is 1, so at most two devices can be attached, and this many UMP
+// interfaces cannot exist. 8 leaves generous room for both devices to present
+// several interfaces each while returning ~34 KB of SRAM.
+#define CFG_TUH_UMP                 8
 #define CFG_TUH_UMP_MAX_GTB         8
 
 #ifdef __cplusplus

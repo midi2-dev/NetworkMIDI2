@@ -107,7 +107,33 @@
 // at High Speed — a 512-byte-max-packet HS configuration descriptor is a
 // follow-up throughput optimisation, not required for correct operation.
 #define CFG_TUD_UMP_RX_BUFSIZE  512  // Must be modulo 4, 32 bits per UMP message or segment
-#define CFG_TUD_UMP_TX_BUFSIZE  512  // Must be modulo 4, 32 bits per UMP message or segment
+// Network -> USB burst buffer. The session hands over everything it parsed
+// from a datagram in one go, so this has to absorb a burst, not an average.
+// At 512 bytes (128 words, ~64 two-word SysEx messages) it overflowed and the
+// bridge discarded 32 messages out of 10211 -- which matters far more than it
+// sounds, because those are SysEx fragments and losing one corrupts the whole
+// message: the host reassembles it short and reports corruption with nothing
+// missing. An intermediate queue in the bridge was tried and was worse; this
+// FIFO is the right place for it.
+// Must be modulo 4, 32 bits per UMP message or segment.
+//
+// Sized to hold one whole maximum-size SysEx burst, matching the Pico builds.
+// The network session delivers an entire inbound SysEx within a single tick(),
+// so the FIFO has to absorb the message in one go rather than at the rate USB
+// drains it. A 4096-byte SysEx arrives as SysEx7 (6 data bytes per 2-word
+// packet) = 683 packets = 1366 words = 5464 bytes -- larger than the old
+// 4096-byte FIFO even when completely empty, so the tail of every large SysEx
+// was dropped regardless of how low the average rate was, reaching the host as
+// a complete-but-short message with a bad checksum.
+//
+// Root-caused and measured on ProtoZOA (RP2040), where raising this took
+// net2usb from ~90% of bytes with 2-3 bad checksums to a clean 18384/18384 and
+// zero. The FRDM-MCXN947 shows the same ~10% large-SysEx checksum failures
+// from the same arithmetic, but this change has NOT yet been confirmed on that
+// hardware -- the board was not connected when it was made. Verify with
+// tools/nm2_perf before treating the NXP number as fixed; gCnt.usbTxFail is
+// the counter to watch.
+#define CFG_TUD_UMP_TX_BUFSIZE  16384
 
 #ifdef __cplusplus
 }

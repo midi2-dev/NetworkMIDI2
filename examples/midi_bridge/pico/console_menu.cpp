@@ -259,14 +259,7 @@ bool runClientHostSelect(BridgeConfig &cfg, IDiscovery &disc,
         manual = true;
     }
 
-    if (manual) {
-        readIpWithDefault("Host IP", cfg.clientHostIp, sizeof(cfg.clientHostIp),
-                           cfg.clientHostIp[0] ? cfg.clientHostIp : "192.168.1.100");
-        printf("Host port [%u]: ", cfg.clientHostPort);
-        char portAns[8] = {};
-        readLine(portAns, sizeof(portAns));
-        if (portAns[0]) cfg.clientHostPort = (uint16_t) atoi(portAns);
-    } else {
+    if (!manual) {
         unsigned choice = 0;
         if (!sawInput) {
             // Unattended boot that did find hosts. Nobody is there to pick
@@ -277,16 +270,38 @@ bool runClientHostSelect(BridgeConfig &cfg, IDiscovery &disc,
             printf("No console input -- defaulting to host [1] (%s).\r\n", hosts[0].epName);
         }
         while (choice < 1 || choice > hostCount) {
-            printf("Select host [1-%u]: ", hostCount);
+            printf("Select host [1-%u], or 'm' for manual entry: ", hostCount);
             char ans[8] = {};
             readLine(ans, sizeof(ans));
+            // Manual entry must be reachable from here, not only from the
+            // browse window above. That window's banner advertises 'm', but
+            // it has already closed by the time this prompt appears, and 'm'
+            // typed here just fed atoi() a 0, failed the range check and
+            // reprompted -- leaving no way to reach manual entry short of a
+            // reboot. Hit in practice whenever a host that is advertising
+            // perfectly well simply misses the 4 s browse window.
+            if (ans[0] == 'm' || ans[0] == 'M') {
+                manual = true;
+                break;
+            }
             choice = (unsigned) atoi(ans);
         }
-        const DiscoveredPeer &picked = hosts[choice - 1];
-        uint32_t ip = picked.endpoint.ipv4;
-        snprintf(cfg.clientHostIp, sizeof(cfg.clientHostIp), "%u.%u.%u.%u",
-                  (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
-        cfg.clientHostPort = picked.endpoint.port;
+        if (!manual) {
+            const DiscoveredPeer &picked = hosts[choice - 1];
+            uint32_t ip = picked.endpoint.ipv4;
+            snprintf(cfg.clientHostIp, sizeof(cfg.clientHostIp), "%u.%u.%u.%u",
+                      (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+            cfg.clientHostPort = picked.endpoint.port;
+        }
+    }
+
+    if (manual) {
+        readIpWithDefault("Host IP", cfg.clientHostIp, sizeof(cfg.clientHostIp),
+                           cfg.clientHostIp[0] ? cfg.clientHostIp : "192.168.1.100");
+        printf("Host port [%u]: ", cfg.clientHostPort);
+        char portAns[8] = {};
+        readLine(portAns, sizeof(portAns));
+        if (portAns[0]) cfg.clientHostPort = (uint16_t) atoi(portAns);
     }
 
     saveBridgeConfig(cfg);

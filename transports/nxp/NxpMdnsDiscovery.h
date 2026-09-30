@@ -66,8 +66,14 @@ private:
         char     epName[kEndpointNameMax];
         char     productId[kProductIdMax];
         uint16_t port    = 0;
+        // A-record RDATA as it arrived on the wire (network byte order), when
+        // the responder included one in the same answer group as the SRV --
+        // see onSearchResult()'s DNS_RRTYPE_A branch for why using it beats
+        // resolving the SRV target by name afterwards.
+        uint32_t addrNet = 0;
         bool     hasPort = false;
         bool     hasHost = false;
+        bool     hasAddr = false;
     };
 
     PendingPeer    pending_{};
@@ -77,6 +83,29 @@ private:
     DiscoveredPeer queue_[kQueueDepth] = {};
     unsigned       qHead_ = 0;
     unsigned       qTail_ = 0;
+
+    // dns_gethostbyname() for a real ".local" hostname is a genuine async
+    // network round-trip (can take seconds -- e.g. a real host answering
+    // several seconds later, after other session traffic settles). If a
+    // SECOND service's PTR/SRV/TXT answers get processed into the single
+    // shared `pending_` accumulator before the FIRST service's hostname
+    // resolution completes, onAddrResolved() used to read whatever
+    // port/epName/productId happened to be in `pending_` *at completion
+    // time* -- silently pairing the correct IP for hostname A with the
+    // port/name that actually belonged to hostname B. Confirmed live:
+    // browsing while both a real host and another peer were simultaneously
+    // advertising produced an entry with the real host's name and port but
+    // the OTHER peer's IP. Each in-flight resolution now gets its own
+    // snapshot slot instead of sharing `pending_`.
+    struct PendingResolve {
+        NxpMdnsDiscovery *self  = nullptr;
+        char              epName[kEndpointNameMax];
+        char              productId[kProductIdMax];
+        uint16_t          port  = 0;
+        bool              inUse = false;
+    };
+    static constexpr unsigned kMaxOutstandingResolves = kQueueDepth;
+    PendingResolve resolves_[kMaxOutstandingResolves] = {};
 
     void queuePush(const DiscoveredPeer &p);
 

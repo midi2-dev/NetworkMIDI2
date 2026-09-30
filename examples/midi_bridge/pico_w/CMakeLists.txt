@@ -49,6 +49,8 @@ endif()
 # Release root is three levels up: _release/examples/midi_bridge/pico_w/
 get_filename_component(NM2_RELEASE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 
+include(${NM2_RELEASE_ROOT}/cmake/nm2_pico_tinyusb.cmake)   # before the SDK: TinyUSB 0.21 (third_party/tinyusb-0.21)
+include(${NM2_RELEASE_ROOT}/cmake/nm2_pico_clock.cmake)     # before the SDK: system clock (RP2040: 200 MHz)
 include(${NM2_RELEASE_ROOT}/cmake/pico_sdk_import.cmake)
 
 project(nm2_bridge_pico_w CXX C ASM)
@@ -159,10 +161,22 @@ target_include_directories(nm2_bridge_pico_w PRIVATE
     ${NM2_RELEASE_ROOT}/include
     ${NM2_RELEASE_ROOT}/transports/lwip
 )
+# WiFi power save. ON keeps the CYW43 driver default (the radio dozes between
+# beacons); OFF keeps the radio awake (CYW43_NONE_PM) for latency.
+option(NM2_PICO_W_POWERSAVE "Leave CYW43 WiFi power save at the driver default" ON)
+# Minimum spacing of outbound Network MIDI datagrams (0 = off).
+set(NM2_PICO_W_TX_INTERVAL_MS 0 CACHE STRING "Minimum ms between outbound Network MIDI datagrams (0 = off)")
+# PIO clock divider for the SPI link to the CYW43 (empty = SDK default).
+set(NM2_PICO_W_CYW43_PIO_DIV "" CACHE STRING "CYW43_PIO_CLOCK_DIV_INT override (empty = SDK default)")
+if(NM2_PICO_W_CYW43_PIO_DIV)
+    target_compile_definitions(nm2_bridge_pico_w PRIVATE CYW43_PIO_CLOCK_DIV_INT=${NM2_PICO_W_CYW43_PIO_DIV})
+endif()
 target_compile_definitions(nm2_bridge_pico_w PRIVATE
     NM2_HAVE_LWIP_MDNS=1
     NM2_MDNS_NAME="${NM2_MDNS_NAME}"
     NM2_BRIDGE_USB_HOST=${NM2_BRIDGE_USB_HOST}
+    NM2_PICO_W_POWERSAVE=$<BOOL:${NM2_PICO_W_POWERSAVE}>
+    NM2_PICO_W_TX_INTERVAL_MS=${NM2_PICO_W_TX_INTERVAL_MS}
 )
 target_compile_options(nm2_bridge_pico_w PRIVATE -Wno-narrowing -Wno-unused-variable)
 
@@ -194,7 +208,9 @@ target_link_libraries(nm2_bridge_pico_w PRIVATE
     pico_lwip_mdns
 )
 
-if(NM2_BRIDGE_USB_HOST)
+# The override is for TinyUSB 0.18 only (cmake/nm2_pico_tinyusb.cmake sets
+# NM2_PICO_HCD_OVERRIDE OFF when building against third_party/tinyusb-0.21).
+if(NM2_BRIDGE_USB_HOST AND NM2_PICO_HCD_OVERRIDE)
     # Swap in the patched hcd_rp2040.c (reused from examples/midi_bridge/pico
     # -- see that file's header comment), scoped to this target only. Pico 2
     # W's RP2350 has no separate TinyUSB portable driver, only the shared

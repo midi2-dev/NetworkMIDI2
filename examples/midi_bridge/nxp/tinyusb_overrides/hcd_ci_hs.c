@@ -113,11 +113,28 @@ bool hcd_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
   hcd_reg->USBMODE = USBMODE_CM_HOST;
 #endif
 
-  // FIXME force full speed, still have issue with Highspeed enumeration
-  // probably due to physical connection bouncing when plug/unplug
-  // 1. Have issue when plug/unplug devices, maybe the port is not reset properly
-  // 2. Also does not seems to detect disconnection
+  // Backport of upstream hathach/tinyusb fc43eedd: the unconditional force to
+  // full speed was a workaround for attach bouncing, which usbh.c's
+  // ENUM_DEBOUNCING_DELAY_MS now handles. Forced FS capped a Pi gadget on the
+  // FRDM-MCXN947's HS port at full speed. Only force it when the host is not
+  // configured for high speed.
+  #if !TUH_OPT_HIGH_SPEED
   hcd_reg->PORTSC1 |= PORTSC1_FORCE_FULL_SPEED;
+  #endif
+
+  // Interrupt Threshold Control: deliver transfer-complete interrupts
+  // immediately instead of at the reset default of 8 micro-frames (1 ms).
+  // TinyUSB keeps one IN transfer queued per endpoint and re-arms it from the
+  // completion interrupt, so the default threshold capped a bulk IN endpoint
+  // at one transfer per millisecond. A device that sends each message as its
+  // own short transfer (a Linux f_midi2 gadget writing a chord note by note)
+  // then had its 10-note chord spread over 9 ms on the network side: measured
+  // on the wire as 10 datagrams exactly 1.000 ms apart, with the IN endpoint
+  // armed and waiting the whole time. dcd_ci_hs.c already clears this for the
+  // device role; ehci.c never touches it for the host role. Must be written
+  // while the controller is halted (EHCI 2.3.1), i.e. here, after reset and
+  // before ehci_init() sets Run.
+  hcd_reg->USBCMD &= ~USBCMD_INTR_THRESHOLD_MASK;
 
   return ehci_init(rhport, (uint32_t) &hcd_reg->CAPLENGTH, (uint32_t) &hcd_reg->USBCMD);
 }

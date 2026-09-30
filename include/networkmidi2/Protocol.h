@@ -48,6 +48,8 @@ enum class Cmd : uint8_t {
     RetransmitRequest  = 0x80, ///< Either → Either: request retransmission of a lost packet
     RetransmitError    = 0x81, ///< Either → Either: cannot fulfil retransmit request
     SessionReset       = 0x82, ///< Either → Either: reset sequence counters to zero
+    SessionResetReply  = 0x83, ///< Either → Either: acknowledge a Session Reset (spec 6.12)
+    Nak                = 0x8F, ///< Either → Either: report a problem with a Command (spec 6.15)
     Bye                = 0xF0, ///< Either → Either: close session
     ByeReply           = 0xF1, ///< Either → Either: acknowledge Bye
     UmpData            = 0xFF, ///< Either → Either: one UMP message
@@ -122,8 +124,33 @@ size_t pktAppendRetransmitRequest(uint8_t *buf, size_t offset, size_t cap,
 size_t pktAppendRetransmitError(uint8_t *buf, size_t offset, size_t cap,
                                 uint16_t seqNum);
 
+/** Retransmit Error in the M2-124-UM 7.2.4 layout (Table 31): payload length
+ *  1, CSD1 = reason (0x00 unknown, 0x01 not in the transmit buffer), CSD2 = 0,
+ *  then the Sequence Number of the first UMP Data Command that CAN still be
+ *  retransmitted. pktAppendRetransmitError() (sequence number in the CSD, no
+ *  payload) predates this and is kept unchanged for existing callers. */
+size_t pktAppendRetransmitErrorSpec(uint8_t *buf, size_t offset, size_t cap,
+                                    uint8_t reason, uint16_t firstAvailableSeq);
+
 /** Append a Session-Reset command (0x82). */
 size_t pktAppendSessionReset(uint8_t *buf, size_t offset, size_t cap);
+
+/** Append a Session-Reset-Reply command (0x83).
+ *  Section 6.12: the required response to a Session Reset. Sending another
+ *  Session Reset instead makes two peers reset each other indefinitely. */
+size_t pktAppendSessionResetReply(uint8_t *buf, size_t offset, size_t cap);
+
+/** Append a NAK command (0x8F), section 6.15 Table 24.
+ *
+ *  @param reason      NakReason value.
+ *  @param nakedHeader First 32-bit word of the offending Command, copied
+ *                     directly, so the peer can tell which one is complained
+ *                     about. The spec requires this word; a NAK without it
+ *                     names no command.
+ *  @param text        Optional UTF-8 text, or nullptr. */
+size_t pktAppendNak(uint8_t *buf, size_t offset, size_t cap,
+                    uint8_t reason, const uint8_t nakedHeader[4],
+                    const char *text = nullptr);
 
 /** Append a Bye command (0xF0). */
 size_t pktAppendBye(uint8_t *buf, size_t offset, size_t cap, uint8_t reason);

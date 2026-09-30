@@ -135,6 +135,38 @@ extern "C" void __libc_init_array(void);
 extern "C" void _init(void) {}  // required stub for newlib __libc_init_array
 extern "C" void *__dso_handle __attribute__((weak)) = nullptr; // for __cxa_atexit
 
+// ---------------------------------------------------------------------------
+// Is SRAMX usable? Checked, not assumed.
+//
+// SRAMX sits at 0x0400_0000 -- a different address space from the main SRAM at
+// 0x2000_0000 -- and on these parts RAM partitions can be left unpowered or
+// unclocked at boot, in which case a write faults rather than failing quietly.
+// Anything moved there (the UDP receive ring is the candidate: it is filled by
+// a CPU memcpy out of an lwIP pbuf, so unlike USB or ENET buffers it needs no
+// DMA reach) depends on this being true.
+//
+// The "probing" line is printed BEFORE the first access on purpose: if the
+// access faults, the last thing on the console says exactly where it died.
+// ---------------------------------------------------------------------------
+static uint32_t s_sramxProbe[64] __attribute__((section(".bss.$SRAMX")));
+
+static void probeSramx(void)
+{
+    printf("[mem] SRAMX probe: writing %u words at %p ...\r\n",
+           (unsigned) (sizeof s_sramxProbe / sizeof s_sramxProbe[0]),
+           (void *) s_sramxProbe);
+
+    for (unsigned i = 0; i < sizeof s_sramxProbe / sizeof s_sramxProbe[0]; ++i)
+        s_sramxProbe[i] = 0xA5A50000u ^ i;
+
+    unsigned bad = 0;
+    for (unsigned i = 0; i < sizeof s_sramxProbe / sizeof s_sramxProbe[0]; ++i)
+        if (s_sramxProbe[i] != (0xA5A50000u ^ i)) ++bad;
+
+    printf("[mem] SRAMX probe: %s (%u mismatches)\r\n",
+           bad ? "FAILED -- do not place data here" : "OK, readback matches", bad);
+}
+
 int main(void)
 {
     __libc_init_array(); // runs C++ static constructors (vtable init, etc.)
@@ -163,6 +195,8 @@ int main(void)
         printf("\r\n\r\n");
     }
 
+    probeSramx();
+
     // Power up and clock the USB1 High-Speed controller/PHY. tusb_init()
     // itself is deferred to vUsbDeviceTask, which runs after the scheduler
     // starts (see kUsbStackWords comment above).
@@ -175,7 +209,7 @@ int main(void)
     // Add the ENET_QOS netif to lwIP (left down -- DHCP vs. static IP is a
     // runtime setup-menu choice vSessionTask makes later, see board_init.h).
     // Must run after tcpip_init() and before vTaskStartScheduler().
-    NM2_NetifAdd(nullptr); // nullptr → use default MAC address
+    NM2_NetifAdd(nullptr); // nullptr → derive a unique MAC from this chip's UUID
 
     // USB device task: services the MIDI 2.0 (UMP) interface.
     xTaskCreate(vUsbDeviceTask, "usbd",

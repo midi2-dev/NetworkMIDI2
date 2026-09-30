@@ -55,6 +55,30 @@ public:
      *  Implementations must not block. */
     virtual size_t receive(UdpEndpoint &from, uint8_t *buf, size_t cap) = 0;
 
+    /** Non-blocking receive without copying.
+     *
+     *  Returns a pointer to the next datagram inside the transport's own
+     *  storage, setting @p len and @p from, or nullptr when none is pending.
+     *  The data is valid only until the next receive call on this transport,
+     *  and must not be written to.
+     *
+     *  A transport that already holds a contiguous copy of the datagram can
+     *  hand out a pointer to it and save both the second copy and the caller's
+     *  buffer. The lwIP-based transports are in that position: lwIP may hand
+     *  over a chained pbuf, which has to be flattened into contiguous storage
+     *  before it can be parsed, so the copy exists whether or not the caller
+     *  wants one. Reclaiming the caller's buffer is worth real memory on the
+     *  embedded targets.
+     *
+     *  The default returns nullptr, so a transport that cannot do this keeps
+     *  working through receive() above unchanged. */
+    virtual const uint8_t *receiveInPlace(UdpEndpoint &from, size_t &len)
+    {
+        (void) from;
+        len = 0;
+        return nullptr;
+    }
+
     /** Monotonic millisecond counter.  Used by the session for all timers.
      *  Must not return 0 (reserved as "uninitialised"). */
     virtual uint32_t nowMillis() = 0;

@@ -43,9 +43,14 @@
 #include "fsl_phy.h"
 #include "fsl_phylan8741.h"
 
+// ROM API flash driver -- for FFR_GetUUID() in deriveUniqueMac() below.
+#include "fsl_flash.h"
+#include "fsl_flash_ffr.h"
+
 // lwIP
 #include "lwip/tcpip.h"
 #include "lwip/dhcp.h"
+#include "lwip/autoip.h"
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/netifapi.h"
@@ -70,8 +75,40 @@ extern "C" {
 // Constants
 // ---------------------------------------------------------------------------
 
-// Default locally-administered MAC address for FRDM-MCXN947.
-static const uint8_t kDefaultMac[6] = { 0x02, 0x12, 0x13, 0x10, 0x15, 0x11 };
+// "Development" MAC base for FRDM-MCXN947 -- locally-administered (0x02) +
+// a fixed 2-byte prefix (0x12, 0x13). The last 3 bytes are a hardcoded
+// fallback, overwritten per-board by deriveUniqueMac() below with a fold of
+// this chip's factory UUID whenever NM2_NetifAdd(nullptr) is used (every
+// caller today -- see main.cpp). Before this fix every NXP board built from
+// this firmware shared this exact fixed value, which collides as soon as a
+// second one is on the same network -- unlike the Pico/ProtoZOA bridge
+// (examples/midi_bridge/pico/wiznet_port/w5x00_lwip.c), which already
+// derives its last 3 bytes from the RP2040's own unique flash ID.
+static uint8_t kDefaultMac[6] = { 0x02, 0x12, 0x13, 0x10, 0x15, 0x11 };
+
+// Overwrites kDefaultMac[3..5] with a fold of this chip's factory-programmed
+// 128-bit UUID (FFR_GetUUID(), via the MCXN947 ROM API's Flash Firmware
+// Region/CMPA page) -- XOR-folding all 16 bytes down to 3 rather than just
+// truncating, same rationale as the Pico bridge's own fold: chips from the
+// same manufacturing batch/wafer are known to share ID prefixes, which
+// truncation would just reproduce as another collision. Leaves kDefaultMac
+// at its hardcoded (still valid, just non-unique) fallback if the UUID read
+// fails for any reason -- this must never be allowed to block bringing the
+// netif up.
+static void deriveUniqueMac(void)
+{
+    flash_config_t flashConfig;
+    memset(&flashConfig, 0, sizeof(flashConfig));
+    if (FLASH_Init(&flashConfig) != kStatus_Success) return;
+    if (FFR_Init(&flashConfig) != kStatus_Success) return;
+
+    uint8_t uuid[16];
+    if (FFR_GetUUID(&flashConfig, uuid) != kStatus_Success) return;
+
+    kDefaultMac[3] = uuid[0] ^ uuid[4] ^ uuid[8]  ^ uuid[12];
+    kDefaultMac[4] = uuid[1] ^ uuid[5] ^ uuid[9]  ^ uuid[13];
+    kDefaultMac[5] = uuid[2] ^ uuid[6] ^ uuid[10] ^ uuid[14];
+}
 
 // PHY address on the ENET MDIO bus (LAN8741 straps PHYAD[2:0] = 000 → addr 0)
 #define NM2_PHY_ADDRESS  0U
@@ -84,6 +121,27 @@ static const uint8_t kDefaultMac[6] = { 0x02, 0x12, 0x13, 0x10, 0x15, 0x11 };
 // ---------------------------------------------------------------------------
 
 static struct netif          s_netif;
+
+// Diagnostic: frame arrival gaps at the driver -> lwIP handoff (the SDK's RX
+// task calling netif->input), bucketed like NxpUdpTransport::rxGapHist():
+// <50us, 50-100, 100-250, 250-500, 0.5-1ms, 1-2ms, 2-5ms, >=5ms. Paired with
+// that histogram it says whether an inbound burst is paced in the driver
+// (gaps already here) or inside lwIP's thread (gaps appear only later).
+extern "C" uint32_t gDrvRxGapHist[8];
+uint32_t gDrvRxGapHist[8] = {};
+
+static uint32_t s_drvRxLastCyc = 0;
+static err_t timedTcpipInput(struct pbuf *p, struct netif *inp)
+{
+    const uint32_t c  = DWT->CYCCNT;
+    const uint32_t us = (c - s_drvRxLastCyc) / (SystemCoreClock / 1000000u);
+    s_drvRxLastCyc = c;
+    static const uint32_t kEdgeUs[7] = {50, 100, 250, 500, 1000, 2000, 5000};
+    unsigned b = 0;
+    while (b < 7 && us >= kEdgeUs[b]) ++b;
+    ++gDrvRxGapHist[b];
+    return tcpip_input(p, inp);
+}
 static phy_handle_t          s_phyHandle;
 static phy_lan8741_resource_t s_phyResource;
 static ethernetif_config_t   s_ethConfig;
@@ -141,6 +199,9 @@ void NM2_BoardInit(void)
 
 void NM2_NetifAdd(const uint8_t *mac6)
 {
+    if (!mac6) {
+        deriveUniqueMac();
+    }
     const uint8_t *mac = mac6 ? mac6 : kDefaultMac;
 
     // Wire up MDIO read/write callbacks for LAN8741 PHY driver.
@@ -161,9 +222,12 @@ void NM2_NetifAdd(const uint8_t *mac6)
     // NM2_NetifStartDhcp()/NM2_NetifSetStatic() below).
     // Called from main() before vTaskStartScheduler(), so tcpip_thread has not
     // started yet — netif_add() is safe without core locking.
+    printf("MAC address: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
     ip4_addr_t zero = IPADDR4_INIT(0U);
     netif_add(&s_netif, &zero, &zero, &zero,
-              &s_ethConfig, ethernetif0_init, tcpip_input);
+              &s_ethConfig, ethernetif0_init, timedTcpipInput);
     netif_set_default(&s_netif);
 }
 
@@ -171,6 +235,11 @@ void NM2_NetifStartDhcp(void)
 {
     netif_set_up(&s_netif);
     dhcp_start(&s_netif);
+}
+
+void NM2_NetifStartAutoIp(void)
+{
+    autoip_start(&s_netif);
 }
 
 bool NM2_NetifSetStatic(const char *ip, const char *netmask, const char *gateway, const char *dns)
@@ -192,6 +261,18 @@ bool NM2_NetifSetStatic(const char *ip, const char *netmask, const char *gateway
     }
 
     return true;
+}
+
+// FreeRTOS run-time stats clock (FreeRTOSConfig.h): the DWT cycle counter / 128.
+extern "C" void nm2RunTimeStatsInit(void)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL        |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+extern "C" uint32_t nm2RunTimeStatsNow(void)
+{
+    return DWT->CYCCNT >> 7;
 }
 
 void NM2_UsbHsInit(void)
@@ -269,11 +350,42 @@ int NM2_GetCharNonBlocking(void)
 // This strong _write() definition overrides the no-op stub in libnosys.a and
 // ensures all newlib stdio output lands on the MCU-Link virtual COM port.
 // ---------------------------------------------------------------------------
+// Bytes discarded because the debug UART stopped draining. Non-zero means the
+// console stalled at some point -- otherwise invisible, since the evidence of
+// a stalled console is the absence of output.
+extern "C" { volatile uint32_t gConsoleTxDropped = 0; }
+
 extern "C" int _write(int /*fd*/, const char *buf, int len)
 {
-    LPUART_WriteBlocking(reinterpret_cast<LPUART_Type *>(BOARD_DEBUG_UART_BASEADDR),
-                         reinterpret_cast<const uint8_t *>(buf),
-                         static_cast<size_t>(len));
+    // NOT LPUART_WriteBlocking(). That waits forever for TX space, and this
+    // runs on the same task that services the console keys and the
+    // NetworkMIDI2 session tick -- so a debug UART that stops draining takes
+    // the bridge down with it, silently: USB MIDI keeps enumerating (its own
+    // task and IRQ) while ESC stops working and the session eventually times
+    // out. Observed three times on the bench, each needing a debug-probe reset
+    // to clear.
+    //
+    // Diagnostics are not worth a bridge. If the console will not take a byte
+    // within a bounded wait, the rest of the line is dropped and the caller
+    // continues. The wait is generous next to one character time at 115200
+    // (~87 us) but bounded to single-digit milliseconds, and only the first
+    // character of a stalled write pays it -- the remainder returns at once.
+    constexpr uint32_t kTxSpinLimit = 200000U;
+
+    auto *uart = reinterpret_cast<LPUART_Type *>(BOARD_DEBUG_UART_BASEADDR);
+    for (int i = 0; i < len; ++i) {
+        uint32_t spins = 0;
+        while ((LPUART_GetStatusFlags(uart) &
+                static_cast<uint32_t>(kLPUART_TxDataRegEmptyFlag)) == 0U) {
+            if (++spins >= kTxSpinLimit) {
+                gConsoleTxDropped += static_cast<uint32_t>(len - i);
+                // Report the full length as written: newlib retries a short
+                // write, which would spin here again for every later byte.
+                return len;
+            }
+        }
+        LPUART_WriteByte(uart, static_cast<uint8_t>(buf[i]));
+    }
     return len;
 }
 

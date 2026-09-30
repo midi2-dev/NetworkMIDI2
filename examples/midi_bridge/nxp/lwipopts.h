@@ -75,7 +75,14 @@ void sys_mark_tcpip_thread(void);
 #define TCPIP_THREAD_NAME               "lwIP"
 #define TCPIP_THREAD_STACKSIZE          ( 1024 )
 #define TCPIP_THREAD_PRIO               8
-#define TCPIP_MBOX_SIZE                 32
+// Every received frame handed to tcpip_thread takes one TCPIP_MSG_INPKT and one
+// mbox slot until the thread gets to it. lwIP's default is 8 INPKT messages,
+// which the 5-frame RX buffer default used to hide: with ENET_RXBUFF_NUM raised
+// (see below), the 'h' breakdown moved the loss straight here -- 1156 frames
+// refused for want of an INPKT message in one 4096 B SysEx run from a Mac.
+// Sized above the 32 frames the driver can now have in flight.
+#define TCPIP_MBOX_SIZE                 64
+#define MEMP_NUM_TCPIP_MSG_INPKT        48
 
 // ---------------------------------------------------------------------------
 // Default mailbox sizes (raw/UDP/TCP receive queues inside tcpip_thread)
@@ -101,8 +108,32 @@ void sys_mark_tcpip_thread(void);
 // GPIO interrupt — avoids needing EXAMPLE_PHY_INT_PORT/PIN configuration.
 #define ETH_LINK_POLLING_INTERVAL_MS    1500
 
-// Ethernet DMA ring sizes — must match BOARD_ENET_TX_BD_NUM / RX_BD_NUM
-// in the NXP SDK board.h.  16 is the typical default for FRDM-MCXN947.
+// Never toggle the ENET RX interrupt at runtime. With this on (the SDK default
+// under FreeRTOS), the port masks RX interrupts whenever it runs out of RX
+// buffers and re-enables them with ENET_EnableInterrupts(kENET_DmaRx) -- but in
+// SDK 2.16 fsl_enet.c that function ASSIGNS DMA_CHX_INT_EN rather than OR-ing
+// into it, and the disable path clears the shared NIE summary bit. Either one
+// switches off the TX-complete interrupt for good, after which finished frames
+// are only reclaimed when an RX interrupt happens to fire. Every udp_sendto()
+// then blocks in linkoutput waiting for a TX descriptor: measured 15 ms average,
+// 335 ms worst case, capping USB->network at ~12 KB/s on a quiet LAN (165 KB/s
+// with a 2 ms ping supplying RX interrupts). Leaving it off keeps the TIE set
+// by ENET_Init; the cost is an RX interrupt per frame while buffers are short.
+#define ETH_DISABLE_RX_INT_WHEN_OUT_OF_BUFFERS 0
+
+// Ethernet RX buffering. The SDK port's defaults are 5 RX descriptors and
+// 10 buffers, and ENET_RXBD_NUM buffers are always held by the DMA -- so only
+// 5 received frames can be in flight into lwIP at once (zero-copy: a buffer
+// stays pinned until tcpip_thread frees the pbuf). A peer that sends one small
+// datagram per UMP Data command (macOS and Windows both do) exhausts that in a
+// burst. Measured with the 'h' breakdown, 4096 B SysEx from a Mac: of 3378
+// datagrams that reached the board's port, 916 were dropped because the driver
+// could not allocate a buffer and 384 in MAC FIFO overflow -- and nothing
+// above the driver dropped any. 16 descriptors / 48 buffers lets 32 frames be
+// in flight; paid for by shrinking the FreeRTOS heap (FreeRTOSConfig.h).
+#define ENET_RXBD_NUM                   16
+#define ENET_RXBUFF_NUM                 48
+
 #define ETH_PAD_SIZE                    0
 
 // Zero-copy RX path uses custom pbufs that wrap ENET DMA buffers.
@@ -124,6 +155,15 @@ void sys_mark_tcpip_thread(void);
 #define LWIP_TCP                        1   // required by lwIP core even if unused
 #define LWIP_UDP                        1
 #define LWIP_DHCP                       1
+// Link-local (RFC 3927) self-assignment when no DHCP server ever answers --
+// e.g. a direct point-to-point cable to a peer with no DHCP server of its
+// own, a real scenario for this bridge (see board_init.cpp's
+// NM2_NetifStartAutoIp()/vSessionTask's WAIT_NETWORK timeout handler for
+// where this actually gets triggered). The console's "[D]HCP/link-local"
+// wording predates this -- until now it was aspirational only, with no
+// LWIP_AUTOIP anywhere in the build, so DHCP alone would just retry forever
+// with no fallback if no server ever replied.
+#define LWIP_AUTOIP                     1
 #define LWIP_DNS                        1
 #define LWIP_TCP_KEEPALIVE              0
 #define LWIP_IGMP                       1   // required for mDNS multicast
@@ -184,13 +224,19 @@ uint32_t lwip_rand(void);
 // ---------------------------------------------------------------------------
 // Stats (debug builds only)
 // ---------------------------------------------------------------------------
+// LINK, SYS and MEMP stats are on in every build: they are what places a lost
+// inbound datagram -- driver buffer allocation failed (link.drop), the handoff
+// to tcpip_thread refused (sys.mbox.err / memp TCPIP_MSG_INPKT err), or the
+// pbuf pool empty -- and the bridge's 'h' console command prints them. A few
+// counter increments per packet; nothing is printed unless asked for.
 #define MEM_STATS                       0
-#define SYS_STATS                       0
-#define MEMP_STATS                      0
-#define LINK_STATS                      0
+#define SYS_STATS                       1
+#define MEMP_STATS                      1
+#define LINK_STATS                      1
+#define LWIP_STATS                      1
+#define LWIP_STATS_LARGE                1   // 32-bit counters: 16-bit wrap inside one test
 
 #ifndef NDEBUG
 #define LWIP_DEBUG                      1
-#define LWIP_STATS                      1
 #define LWIP_STATS_DISPLAY              1
 #endif

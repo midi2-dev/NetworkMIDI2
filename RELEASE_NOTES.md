@@ -1,5 +1,70 @@
 # NetworkMIDI2 Release Notes
 
+## v0.4.0 — September 2026
+
+Reliability release: everything received is delivered in order, SysEx is
+never corrupted by loss, and the bridges keep up with macOS and Windows
+peers. Regression-tested on all four boards in both USB roles.
+
+### Library
+
+- **In-order delivery.** Commands arriving after a gap are held and
+  released in sequence once the gap is filled or given up on; a late copy
+  of a given-up command is dropped rather than delivered out of order.
+  A Retransmit Error skips the lost commands without resetting the
+  session (M2-124-UM 7.2.4), and outbound Retransmit Errors follow Table 31.
+- **SysEx integrity across loss.** When a gap has to be given up on, a
+  SysEx that loses any part is dropped whole; one that has already
+  started downstream is ended there with a zero-length End. Previously the
+  remains of two messages could be joined into one, seen as bad checksums
+  or messages out of order. New diagnostics: `sysexCutOff`, `sysexOrphans`.
+- **macOS retransmit replies.** macOS answers a Retransmit Request with a
+  Retransmit Error naming the requested command itself; that command is
+  now given up at once instead of being requested again.
+- **Session Reset:** in-flight copies of the old stream are no longer
+  delivered as the start of the new one.
+- **Bye reason** is read from the correct byte (a Windows host that still
+  holds a session answers 0x40, "This device is already connected").
+- **New sessions** start fresh sequence state; a host answers a repeated
+  invitation from its own peer (recovers a half-open session in ~50 ms).
+- **`setMinTxIntervalMs()`** (opt-in, default off): space outbound UMP
+  Data datagrams, carrying everything queued in each.
+
+### Bridges
+
+- **RP2040 bridges (W5500-EVB-Pico, ProtoZOA) run at 200 MHz**, the
+  fastest clock the Pico SDK supports: ~0.1-0.2 ms lower median latency,
+  roughly half the tail, and twice the datagram rate.
+  `NM2_PICO_SYS_CLK_MHZ` pins another clock.
+- **Network -> USB keeps up with bursts:** USB is serviced between receive
+  batches and briefly waited for when its FIFO is full; the host-role TX
+  FIFO holds a whole 4 KB SysEx. 1 KB SysEx from Windows: 57% -> 100%.
+- **Pico 2 W:** WiFi link supervision and rejoin, recovery of a stalled
+  CYW43 by power-cycling it, a hardware watchdog, and an option to turn
+  WiFi power save off (`NM2_PICO_W_POWERSAVE=OFF`).
+- **NXP FRDM-MCXN947:** Ethernet transmit interrupt fix (USB -> network
+  ~12 KB/s -> ~180 KB/s), -O2 builds, larger receive rings, staged USB
+  writes. The HOST role image is now included (`bin/nxp/mcxn947/host/`).
+- **New pre-built images:** ProtoZOA DEVICE and HOST roles
+  (`bin/pico/protozoa/`).
+- Pico builds use TinyUSB 0.21 (bulk endpoints on EPX in host role);
+  tusb_ump v0.8.0.
+
+### Known limitations
+
+- **Pico 2 W upload rate:** sustained USB -> WiFi traffic of about 800
+  messages/s, or a single 4 KB SysEx arriving at once from USB, can stall
+  the CYW43. The bridge now recovers (watchdog restart and WiFi power
+  cycle, a few seconds) instead of hanging; normal playing is far below it.
+- **Large SysEx delays what follows it** on every board (head-of-line):
+  notes queued behind a 4 KB SysEx wait for it.
+- **WiFi latency:** over WiFi, median latency is ~0.3-1 ms higher than
+  wired, and 10-37% of messages to the board take more than 5 ms; power
+  save off removes the worst spikes but not the access point's own delay.
+- **Windows MIDI Services** keeps a session for a board that lost power
+  without saying goodbye and refuses it ("already connected") until the
+  Windows MIDI service restarts.
+
 ## v0.2.5 — September 2026
 
 **New example: W5500-EVB-Pico NetworkMIDI2_Bridge (USB MIDI 2.0 <-> Ethernet).**

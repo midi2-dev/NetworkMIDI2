@@ -247,11 +247,18 @@ against the single currently-mounted device (`s_usbHostDaddr`/
 
 ```sh
 cmake -B build_nxp \
-      -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-nxp-mcxn947.cmake \
+      -DCMAKE_TOOLCHAIN_FILE=$PWD/cmake/toolchain-nxp-mcxn947.cmake \
       -DMCUX_SDK_PATH=~/sdk/SDK_2_16_100_FRDM-MCXN947 \
       examples/midi_bridge/nxp
 cmake --build build_nxp -j6
 ```
+
+The toolchain path must be **absolute**. A relative one resolves against the
+build directory rather than the repo, silently picks up a different set of
+flags including `-ffreestanding`, and the build then dies in
+`third_party/AM_MIDI2.0Lib` with several hundred errors about hosted-only
+headers (`<map>`) -- which looks like a broken dependency rather than a wrong
+path.
 
 Add `-DNM2_BRIDGE_USB_ROLE=HOST` to build the HOST role instead (default is
 `DEVICE`). The build produces `nm2_nxp_mcxn947.elf`, `.hex`, and `.bin` in
@@ -310,6 +317,35 @@ after opening the terminal to see the full boot sequence from the start —
 see "Operation" above for what to expect.
 
 ## Known limitations / follow-ups
+
+- **Inbound throughput (Mac → Network → MCXN) has no flow control, by
+  protocol design.** This is the one limitation most likely to be hit in
+  normal use, and it cannot be fixed on the device side alone.
+
+  Network MIDI 2.0 over UDP has no mechanism for a receiver to tell a sender
+  to slow down. There is no window, no credit, no pause — `ReplyPending` is
+  session setup only. A sender that outruns this board keeps sending, and the
+  excess is simply lost: the W5500/ENET RX path overruns, datagrams are
+  dropped, and the session's gap recovery either retransmits (adding yet more
+  traffic) or, once the gap table fills, resets and discards whatever was
+  mid-flight. A SysEx caught by that reset arrives truncated.
+
+  The reverse direction is fine: USB → Network applies real backpressure,
+  because the read loop checks `txSpaceAvailable()` before dequeuing and lets
+  USB NAK the host — which the sending computer actually responds to. Only the
+  inbound direction is exposed.
+
+  Measured on this board, network stack only (USB bypassed, `l` on the
+  console): **~25 KB/s sustained in each direction simultaneously**, clean;
+  saturation and loss set in before 50 KB/s. A single SysEx larger than about
+  768 bytes exceeds the entire session TX FIFO (`kTxFifoSize`, 128 messages ×
+  6 data bytes per SysEx7 packet) and relies on backpressure to get through in
+  pieces — which the inbound direction does not have.
+
+  Practical guidance: keep sustained inbound traffic below ~20 KB/s, and
+  prefer several moderate SysEx messages over one very large one. Under
+  sustained overload macOS has also been observed to close the session itself
+  with `Bye(Normal)` rather than slow down.
 
 - **USB serial number string is a placeholder** (`"abcd1234"` in
   `usb_descriptors.cpp`'s string table, DEVICE role only) — the Pico builds

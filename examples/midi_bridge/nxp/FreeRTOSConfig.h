@@ -76,12 +76,18 @@ extern uint32_t SystemCoreClock;
 // (ehci_data, usbh device/endpoint tables) add enough BSS to overflow the
 // link at 256 KB. This is a static reservation, not actual usage -- this
 // app allocates only a handful of long-lived objects (NetworkMidiSession,
-// discovery/transport state) at dynamic runtime, so 232 KB is still ample
-// headroom for either role, not a tight fit.
+// discovery/transport state) at dynamic runtime.
+//
+// Measured 2026-09-23 (DEVICE role, under load, xPortGetMinimumEverFreeHeapSize
+// via the 'h' console command): 214 KB of 232 KB never touched -- ~23 KB used.
+// Cut to 128 KB, still ~5x the measured need, to fund a larger Ethernet RX
+// buffer pool (ENET_RXBUFF_NUM in lwipopts.h), which is where inbound datagrams
+// were actually being lost. Re-check the low-water mark with 'h' in the HOST
+// role before shrinking further.
 // ---------------------------------------------------------------------------
 #define configSUPPORT_STATIC_ALLOCATION         0
 #define configSUPPORT_DYNAMIC_ALLOCATION        1
-#define configTOTAL_HEAP_SIZE                   ( ( size_t ) ( 232 * 1024 ) )
+#define configTOTAL_HEAP_SIZE                   ( ( size_t ) ( 128 * 1024 ) )
 #define configAPPLICATION_ALLOCATED_HEAP        0
 
 // ---------------------------------------------------------------------------
@@ -95,8 +101,23 @@ extern uint32_t SystemCoreClock;
 // ---------------------------------------------------------------------------
 // Stats / trace
 // ---------------------------------------------------------------------------
-#define configGENERATE_RUN_TIME_STATS           0
-#define configUSE_TRACE_FACILITY                0
+// Per-task CPU accounting, printed by the bridge's 'h' console command. The
+// counter is the Cortex-M33 DWT cycle counter / 128 (1.17 MHz at 150 MHz,
+// wraps every ~61 min; only differences are used). Added to find which task
+// eats the CPU when a peer sends ~2000 small datagrams/s -- the session task,
+// which drains the receive ring, was starved for seconds at a time.
+#define configGENERATE_RUN_TIME_STATS           1
+#define configUSE_TRACE_FACILITY                1
+#ifdef __cplusplus
+extern "C" {
+#endif
+void     nm2RunTimeStatsInit(void);
+uint32_t nm2RunTimeStatsNow(void);
+#ifdef __cplusplus
+}
+#endif
+#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() nm2RunTimeStatsInit()
+#define portGET_RUN_TIME_COUNTER_VALUE()         nm2RunTimeStatsNow()
 #define configUSE_STATS_FORMATTING_FUNCTIONS    0
 
 // ---------------------------------------------------------------------------

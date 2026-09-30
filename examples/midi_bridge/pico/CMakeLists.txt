@@ -45,6 +45,8 @@ endif()
 # Release root is three levels up: _release/examples/midi_bridge/pico/
 get_filename_component(NM2_RELEASE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 
+include(${NM2_RELEASE_ROOT}/cmake/nm2_pico_tinyusb.cmake)   # before the SDK: TinyUSB 0.21 (third_party/tinyusb-0.21)
+include(${NM2_RELEASE_ROOT}/cmake/nm2_pico_clock.cmake)     # before the SDK: system clock (RP2040: 200 MHz)
 include(${NM2_RELEASE_ROOT}/cmake/pico_sdk_import.cmake)
 
 project(nm2_bridge_pico CXX C ASM)
@@ -218,7 +220,9 @@ target_link_libraries(nm2_bridge_pico PRIVATE
     pico_lwip_mdns
 )
 
-if(NM2_BRIDGE_USB_HOST)
+# The override is for TinyUSB 0.18 only (cmake/nm2_pico_tinyusb.cmake sets
+# NM2_PICO_HCD_OVERRIDE OFF when building against third_party/tinyusb-0.21).
+if(NM2_BRIDGE_USB_HOST AND NM2_PICO_HCD_OVERRIDE)
     # Swap in the patched hcd_rp2040.c -- see that file's own header comment.
     target_sources(nm2_bridge_pico PRIVATE tinyusb_overrides/hcd_rp2040.c)
     get_target_property(_tinyusb_host_base_srcs tinyusb_host_base INTERFACE_SOURCES)

@@ -86,6 +86,23 @@ void NM2_NetifAdd(const uint8_t *mac6);
 void NM2_NetifStartDhcp(void);
 
 /**
+ * @brief Start RFC 3927 link-local (169.254.0.0/16) self-assignment
+ * alongside an already-running DHCP client, as a fallback for when no DHCP
+ * server ever answers (e.g. a direct point-to-point cable to a peer with no
+ * DHCP server of its own -- a real scenario for this bridge, not just a
+ * lab setup: two boards, or a board and a PC, cabled directly together).
+ *
+ * Called once from vSessionTask's WAIT_NETWORK state after
+ * kDhcpTimeoutMs has elapsed with no DHCP lease, alongside (not instead of)
+ * that state's existing DHCP retry -- both run concurrently on the same
+ * netif, and DHCP automatically takes over from AutoIP the moment a real
+ * server does answer, later. Same call-site/locking requirements as
+ * NM2_NetifStartDhcp(). Safe to call more than once (autoip_start() is a
+ * no-op if AutoIP is already running on this netif).
+ */
+void NM2_NetifStartAutoIp(void);
+
+/**
  * @brief Assign a static IPv4 address/netmask/gateway/DNS and bring the
  * netif up (no DHCP).
  *
@@ -105,6 +122,10 @@ bool NM2_NetifSetStatic(const char *ip, const char *netmask, const char *gateway
  * receive ISR).
  */
 int NM2_GetCharNonBlocking(void);
+
+/** Bytes dropped because the debug UART stalled. Non-zero means console output
+ *  was lost rather than the bridge being blocked waiting for it. */
+extern volatile uint32_t gConsoleTxDropped;
 
 /**
  * @brief Power up and clock the USB1 ChipIdea High-Speed controller + PHY.

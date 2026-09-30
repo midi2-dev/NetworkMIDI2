@@ -136,8 +136,16 @@ static void wizchip_critical_section_unlock(void)
 
 void wizchip_spi_initialize(void)
 {
-    // this example will use SPI0 at 5MHz
-    spi_init(SPI_PORT, 20000 * 1000);
+    // NM2_W5500_SPI_HZ (CMake cache): SPI clock to the W5500. The chip is
+    // rated to 80 MHz; the RP2040 can drive ~62.5 MHz; what a given board's
+    // wiring carries cleanly is the real limit. Every inbound frame is read
+    // over this bus, so it bounds how many datagrams per second the bridge
+    // can drain -- the limit hit by macOS/Windows peers, which send one new
+    // command per datagram, in bursts at Wi-Fi.
+#ifndef NM2_W5500_SPI_HZ
+#define NM2_W5500_SPI_HZ (20000 * 1000)
+#endif
+    spi_init(SPI_PORT, NM2_W5500_SPI_HZ);
 
     gpio_set_function(PIN_SCK, GPIO_FUNC_SPI);
     gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
@@ -198,7 +206,16 @@ void wizchip_initialize(void)
 #if (_WIZCHIP_ == W5100S)
     uint8_t memsize[2][4] = {{8, 0, 0, 0}, {8, 0, 0, 0}};
 #elif (_WIZCHIP_ == W5500)
-    uint8_t memsize[2][8] = {{8, 0, 0, 0, 0, 0, 0, 0}, {8, 0, 0, 0, 0, 0, 0, 0}};
+    // Socket 0 is the only socket this bridge opens (one MACRAW socket
+    // carrying everything, since lwIP does the demultiplexing), so give it
+    // the chip's whole 16 KB RX buffer instead of the vendor default 8 KB.
+    // The remaining 8 KB was reserved for sockets that are never opened,
+    // while inbound SysEx bursts overran the 8 KB that was in use: frames
+    // were overwritten on the chip before the poll could read them, which
+    // reached the session as an unrecoverable run of missing sequence
+    // numbers and no device-side error anywhere. TX stays at 8 KB -- the
+    // outbound side has never shown backlog.
+    uint8_t memsize[2][8] = {{8, 0, 0, 0, 0, 0, 0, 0}, {16, 0, 0, 0, 0, 0, 0, 0}};
 #endif
 
     if (ctlwizchip(CW_INIT_WIZCHIP, (void *)memsize) == -1)

@@ -277,6 +277,9 @@ Ready-to-run example binaries are in `bin/<platform>/`:
 | `w5500-evb-pico/host/nm2_bridge_pico.uf2` | W5500-EVB-Pico USB MIDI 2.0 <-> Ethernet bridge, HOST role — flash via BOOTSEL |
 | `pico2-w/device/nm2_bridge_pico_w.uf2` | Pico 2 W USB MIDI 2.0 <-> WiFi bridge, DEVICE role (build-time `NM2_BRIDGE_USB_ROLE=DEVICE`, the default) — flash via BOOTSEL |
 | `pico2-w/host/nm2_bridge_pico_w.uf2` | Pico 2 W USB MIDI 2.0 <-> WiFi bridge, HOST role (build-time `NM2_BRIDGE_USB_ROLE=HOST`) — flash via BOOTSEL |
+| `protozoa/device/nm2_bridge_pico.uf2` | ProtoZOA (RP2040 + W5500) USB MIDI 2.0 <-> Ethernet bridge, DEVICE role — flash via BOOTSEL |
+| `protozoa/host/nm2_bridge_pico.uf2` | ProtoZOA USB MIDI 2.0 <-> Ethernet bridge, HOST role (needs the J13 VBUS link) — flash via BOOTSEL |
+| `nxp/mcxn947/host/nm2_nxp_mcxn947.hex` | NXP FRDM-MCXN947 bridge, HOST role (`bin/nxp/mcxn947/` holds the DEVICE role) — flash via LinkServer or pyocd |
 
 Example source code is in `examples/midi_bridge/` and can be built from
 scratch using the included CMakeLists.txt files against the pre-built libs.

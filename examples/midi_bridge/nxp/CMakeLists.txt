@@ -39,6 +39,18 @@ if(NOT CMAKE_TOOLCHAIN_FILE)
         CACHE PATH "NXP MCXN947 toolchain")
 endif()
 
+# Default to an optimised build. With no build type, CMake adds no -O flag at
+# all, so GCC compiled the whole image -- our library, lwIP, TinyUSB, FreeRTOS
+# and the SDK drivers -- at -O0. The toolchain file defines -O2 for Release but
+# nothing ever selected it, and every NXP image to date was built that way.
+# Measured cost: ~27 us of CPU to hand one 8-byte UMP message from the network
+# to USB, which paced a 4 KB SysEx to ~23 ms and every note queued behind it.
+# (The Pico builds were never affected: the Pico SDK defaults to Release.)
+# Pass -DCMAKE_BUILD_TYPE=Debug for an -Og debugging build.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (Release: -O2)" FORCE)
+endif()
+
 project(nm2_nxp_mcxn947 CXX C ASM)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -81,14 +93,56 @@ foreach(_nm2_submodule_check
     endif()
 endforeach()
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# ---------------------------------------------------------------------------
+# USB role: HOST or DEVICE (default), same toggle/rationale as
+# examples/midi_bridge/pico/CMakeLists.txt. DEVICE is the already
+# hardware-validated role -- kept as default so existing builds/docs that
+# don't pass this option are unaffected.
+# ---------------------------------------------------------------------------
+set(NM2_BRIDGE_USB_ROLE "DEVICE" CACHE STRING "USB role: HOST or DEVICE")
+set_property(CACHE NM2_BRIDGE_USB_ROLE PROPERTY STRINGS HOST DEVICE)
+if(NM2_BRIDGE_USB_ROLE STREQUAL "HOST")
+    set(NM2_BRIDGE_USB_HOST 1)
+    # The HOST build carries the USB host stack as well and has only a few KB
+    # of SRAM left, so it cannot afford the UDP receive ring the DEVICE build
+    # uses -- at depth 16 it overflows SRAM outright. Each entry costs
+    # kMaxPacketBytes. Watch NxpUdpTransport::rxDropped() on this build: a
+    # shallower ring makes a burst more likely to be discarded before the
+    # session task drains it.
+    # The transport now lives in SRAMX (see SessionTask.cpp), so the HOST
+    # build's SRAM pressure no longer caps this. Depth in datagrams.
+    set(NM2_NXP_RX_DEPTH 64)
+else()
+    set(NM2_BRIDGE_USB_HOST 0)
+    # Depth in datagrams, not bytes: when kMaxPacketBytes doubled, holding the
+    # byte count constant halved the number of datagrams that fit and brought
+    # back an 11% inbound drop rate. The DEVICE build has the SRAM to keep 32
+    # slots, so it does.
+    # In SRAMX, so this is no longer a main-SRAM trade-off. 64 x kMaxPacketBytes
+    # = 64 KB of the 96 KB available there.
+    set(NM2_NXP_RX_DEPTH 64)
+endif()
+
 # ---------------------------------------------------------------------------
 # NXP MCUXpresso SDK path
 # ---------------------------------------------------------------------------
 if(NOT MCUX_SDK_PATH)
     if(DEFINED ENV{MCUX_SDK_PATH})
         set(MCUX_SDK_PATH "$ENV{MCUX_SDK_PATH}")
+    elseif(EXISTS "$ENV{HOME}/sdk/SDK_2_16_100_FRDM-MCXN947")
+        set(MCUX_SDK_PATH "$ENV{HOME}/sdk/SDK_2_16_100_FRDM-MCXN947")
+        message(STATUS "Auto-detected MCUX_SDK_PATH: ${MCUX_SDK_PATH}")
     else()
-        message(FATAL_ERROR "MCUX_SDK_PATH not set. Pass -DMCUX_SDK_PATH=/path/to/SDK_2_16_100_FRDM-MCXN947")
+        message(FATAL_ERROR
+            "MCUX_SDK_PATH not set.\n"
+            "Pass -DMCUX_SDK_PATH=/path/to/SDK_2_16_100_FRDM-MCXN947\n"
+            "or export MCUX_SDK_PATH before running cmake.\n"
+            "Download SDK 2.16.x for FRDM-MCXN947 from NXP (mcuxpresso.nxp.com) and\n"
+            "extract it, e.g. to ~/sdk/SDK_2_16_100_FRDM-MCXN947 (auto-detected there).")
     endif()
 endif()
 message(STATUS "MCUXpresso SDK: ${MCUX_SDK_PATH}")
@@ -155,9 +209,15 @@ set(NXP_DRIVER_SRCS
     "${SDK_DEVICE_PATH}/drivers/fsl_gpio.c"
     "${SDK_DEVICE_PATH}/drivers/fsl_reset.c"
     "${SDK_DEVICE_PATH}/drivers/fsl_spc.c"
+    # ROM API flash driver -- only needed for FFR_GetUUID() in board_init.cpp,
+    # which reads this chip's factory-programmed 128-bit UUID (CMPA page) to
+    # derive a unique MAC address per board (see deriveUniqueMac()). Nothing
+    # else in this bridge touches on-chip flash programming.
+    "${SDK_DEVICE_PATH}/drivers/romapi/flash/src/fsl_flash.c"
 )
 set(NXP_DRIVER_INCS
     "${SDK_DEVICE_PATH}/drivers"
+    "${SDK_DEVICE_PATH}/drivers/romapi/flash"
 )
 
 # --- PHY component: LAN8741 (on FRDM-MCXN947 Ethernet port) ---
@@ -223,6 +283,12 @@ set(NXP_ALL_INCS
     "${SDK_LWIP_PATH}/src/include"
     "${MCUX_SDK_PATH}/CMSIS/Core/Include"
 )
+# Only some SDK releases' lwIP have src/include/ipv4. Listing a missing
+# directory is fatal once it propagates to an IMPORTED target (the release
+# build's prebuilt libs), so add it only when present.
+if(EXISTS "${SDK_LWIP_PATH}/src/include/ipv4")
+    list(APPEND NXP_ALL_INCS "${SDK_LWIP_PATH}/src/include/ipv4")
+endif()
 
 # ---------------------------------------------------------------------------
 # lwIP core library
@@ -266,8 +332,11 @@ target_compile_definitions(lwip_nxp PUBLIC
 target_link_libraries(lwip_nxp PUBLIC freertos_kernel)
 
 # ---------------------------------------------------------------------------
-# NetworkMIDI2 core — IMPORTED from pre-built release library
+# NetworkMIDI2 core library
 # ---------------------------------------------------------------------------
+set(NM2_ROOT ${NM2_RELEASE_ROOT})
+
+# Imported from the pre-built release library (lib/nxp/mcxn947/).
 add_library(networkmidi2 STATIC IMPORTED)
 set_target_properties(networkmidi2 PROPERTIES
     IMPORTED_LOCATION "${NM2_RELEASE_ROOT}/lib/nxp/mcxn947/libnetworkmidi2.a"
@@ -278,30 +347,42 @@ set_target_properties(networkmidi2 PROPERTIES
 # AM_MIDI2.0Lib (third_party/AM_MIDI2.0Lib submodule) -- UMP message helpers
 # (UMPMessage, umpProcessor) used for local Endpoint/Function Block Discovery
 # replies in SessionTask.cpp's midiendpoint()/functionblock(), same as the
-# Pico DEVICE-role build.
+# Pico DEVICE-role build (examples/midi_bridge/pico/main.cpp).
 #
 # EXCLUDE_FROM_ALL: AM_MIDI2.0Lib's own CMakeLists.txt unconditionally adds a
 # libmidi2_test executable (native x86 test harness, uses <cstdarg> in a way
 # that doesn't cross-compile cleanly under the ARM/newlib toolchain) -- we
 # only need the libmidi2 library target itself.
 # ---------------------------------------------------------------------------
-add_subdirectory(${NM2_RELEASE_ROOT}/third_party/AM_MIDI2.0Lib ${CMAKE_CURRENT_BINARY_DIR}/AM_MIDI2.0Lib EXCLUDE_FROM_ALL)
+add_subdirectory(${NM2_ROOT}/third_party/AM_MIDI2.0Lib ${CMAKE_CURRENT_BINARY_DIR}/AM_MIDI2.0Lib EXCLUDE_FROM_ALL)
 
 # ---------------------------------------------------------------------------
 # TinyUSB device/host stack (USB1 ChipIdea High-Speed) + tusb_ump UMP class
 # driver
 #
 # MCXN947's USB1 HS controller uses TinyUSB's "chipidea/ci_hs" portable
-# driver (CFG_TUSB_MCU=OPT_MCU_MCXN9). Only the portable driver (dcd_ci_hs.c
-# for DEVICE role, register-level only; tinyusb_overrides/hcd_ci_hs.c for
-# HOST role, see its own header comment) and TinyUSB's own core/device/host
-# sources are used here -- NOT TinyUSB's own board.c/pin_mux.c/clock_config.c,
-# which would collide with this example's own board init (see
-# NM2_UsbHsInit() in board_init.cpp).
+# driver (CFG_TUSB_MCU=OPT_MCU_MCXN9, board support:
+# hw/bsp/mcx/boards/frdm_mcxn947 in the third_party/tinyusb submodule) --
+# confirmed present at the exact TinyUSB commit pico-sdk 2.3.0 bundles
+# (0.18.0), which is what third_party/tusb_ump was proven to build against
+# in the Pico examples. Only the portable driver (dcd_ci_hs.c for DEVICE
+# role, register-level only; tinyusb_overrides/hcd_ci_hs.c for HOST role,
+# see its own header comment) and TinyUSB's own core/device/host sources
+# are used here -- NOT TinyUSB's own board.c/pin_mux.c/clock_config.c,
+# which would collide with this example's own NXP-Config-Tools-generated
+# board init (see NM2_UsbHsInit() in board_init.cpp for the equivalent
+# USB1 HS power/clock sequence, ported from TinyUSB's
+# hw/bsp/mcx/family.c board_init()).
 # ---------------------------------------------------------------------------
-set(TINYUSB_ROOT ${NM2_RELEASE_ROOT}/third_party/tinyusb)
+set(TINYUSB_ROOT ${NM2_ROOT}/third_party/tinyusb)
 
 set(CFG_TUSB_DEBUG "0" CACHE STRING "TinyUSB debug log level (0-3) -- verbose device-stack logging over the LPUART console")
+# HOST-role-only override of host/tusb_config.h's CFG_TUH_LOG_LEVEL default (1) --
+# raise to 2 or 3 for full TU_LOG_USBH enumeration tracing (attach, GET_DESCRIPTOR
+# stages, class driver open()/set_config(), tusb_ump's UMPH: GTB/jack diagnostics)
+# when diagnosing a device that never reaches tuh_mount_cb(). No effect unless
+# CFG_TUSB_DEBUG is also raised above 0 (TU_LOG_USBH compiles out below that).
+set(CFG_TUH_LOG_LEVEL "1" CACHE STRING "TinyUSB USBH class-driver log level (0-3), HOST role only")
 
 add_library(nm2_nxp_tinyusb_config INTERFACE)
 if(NM2_BRIDGE_USB_HOST)
@@ -312,6 +393,7 @@ if(NM2_BRIDGE_USB_HOST)
     target_compile_definitions(nm2_nxp_tinyusb_config INTERFACE
         BOARD_TUH_RHPORT=1
         BOARD_TUH_MAX_SPEED=OPT_MODE_HIGH_SPEED
+        CFG_TUH_LOG_LEVEL=${CFG_TUH_LOG_LEVEL}
     )
 else()
     # device/tusb_config.h must be found ahead of host/'s copy.
@@ -382,13 +464,23 @@ target_link_libraries(nm2_nxp_tinyusb PUBLIC freertos_kernel)
 target_compile_options(nm2_nxp_tinyusb PRIVATE -Wno-error)
 
 # ---------------------------------------------------------------------------
-# NXP UDP transport + mDNS — IMPORTED from pre-built release library
+# NXP UDP transport + mDNS discovery
 # ---------------------------------------------------------------------------
+# Imported from the pre-built release library (lib/nxp/mcxn947/), which was
+# built with NM2_NXP_RX_DEPTH=${NM2_NXP_RX_DEPTH}. The define MUST reach every
+# translation unit that includes NxpUdpTransport.h: rxRing_[kRxDepth] sizes the
+# object, so a different value is an ODR violation (the transport and
+# SessionTask.cpp disagree about sizeof(NxpUdpTransport); it has crashed the
+# HOST build before). Keep NM2_NXP_RX_DEPTH at the value set above.
 add_library(nm2_transport_nxp STATIC IMPORTED GLOBAL)
 set_target_properties(nm2_transport_nxp PROPERTIES
     IMPORTED_LOCATION "${NM2_RELEASE_ROOT}/lib/nxp/mcxn947/libnm2_transport_nxp.a"
+    # Not this directory (lwipopts.h, FreeRTOSConfig.h): an imported target's
+    # include dirs are passed as -isystem, which GCC searches after every -I --
+    # behind the SDK sample that has its own lwipopts.h. The application lists
+    # it first itself (NXP_ALL_INCS).
     INTERFACE_INCLUDE_DIRECTORIES "${NM2_RELEASE_ROOT}/transports/nxp;${NM2_RELEASE_ROOT}/include"
-    INTERFACE_COMPILE_DEFINITIONS "NM2_HAVE_LWIP_MDNS=1"
+    INTERFACE_COMPILE_DEFINITIONS "NM2_HAVE_LWIP_MDNS=1;NM2_NXP_RX_DEPTH=${NM2_NXP_RX_DEPTH}"
     INTERFACE_LINK_LIBRARIES "networkmidi2;lwip_nxp"
 )
 
@@ -397,14 +489,14 @@ set_target_properties(nm2_transport_nxp PROPERTIES
 #
 # usb_descriptors.cpp is DEVICE-role only (references CFG_TUD_* macros that
 # don't exist in the HOST role's tusb_config.h); ump_device.cpp/ump_host.cpp
-# each self-guard on CFG_TUD_ENABLED/CFG_TUH_ENABLED, so only the active
-# role's file is needed.
+# each self-guard on CFG_TUD_ENABLED/CFG_TUH_ENABLED, so either could be
+# globbed in unconditionally, but only the active role's file is needed.
 # ---------------------------------------------------------------------------
 set(NM2_BRIDGE_USB_SRC main.cpp SessionTask.cpp board_init.cpp)
 if(NM2_BRIDGE_USB_HOST)
-    list(APPEND NM2_BRIDGE_USB_SRC ${NM2_RELEASE_ROOT}/third_party/tusb_ump/ump_host.cpp)
+    list(APPEND NM2_BRIDGE_USB_SRC ${NM2_ROOT}/third_party/tusb_ump/ump_host.cpp)
 else()
-    list(APPEND NM2_BRIDGE_USB_SRC usb_descriptors.cpp ${NM2_RELEASE_ROOT}/third_party/tusb_ump/ump_device.cpp)
+    list(APPEND NM2_BRIDGE_USB_SRC usb_descriptors.cpp ${NM2_ROOT}/third_party/tusb_ump/ump_device.cpp)
 endif()
 
 add_executable(nm2_nxp_mcxn947
@@ -417,16 +509,17 @@ add_executable(nm2_nxp_mcxn947
 
 target_include_directories(nm2_nxp_mcxn947 PRIVATE
     ${NXP_ALL_INCS}
-    ${NM2_RELEASE_ROOT}/include
-    ${NM2_RELEASE_ROOT}/transports/nxp
-    ${NM2_RELEASE_ROOT}/examples/midi_bridge/freertos   # DroppingTransport.h (portable)
-    ${NM2_RELEASE_ROOT}/third_party/tusb_ump
-    ${NM2_RELEASE_ROOT}/third_party/AM_MIDI2.0Lib
+    ${NM2_ROOT}/include
+    ${NM2_ROOT}/transports/nxp
+    ${NM2_ROOT}/examples/midi_bridge/freertos   # DroppingTransport.h (portable)
+    ${NM2_ROOT}/third_party/tusb_ump
+    ${NM2_ROOT}/third_party/AM_MIDI2.0Lib
 )
 
 target_compile_definitions(nm2_nxp_mcxn947 PRIVATE
     NM2_HAVE_LWIP_MDNS=1
     NM2_BRIDGE_USB_HOST=${NM2_BRIDGE_USB_HOST}
+    NM2_NXP_RX_DEPTH=${NM2_NXP_RX_DEPTH}
     CPU_MCXN947VDF_cm33_core0
     MCUXPRESSO_SDK
     SDK_OS_FREE_RTOS

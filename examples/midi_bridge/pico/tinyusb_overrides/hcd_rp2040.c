@@ -41,13 +41,13 @@
  * an earlier session (a hcd_device_close()/epx reset fix, and a real
  * hcd_edpt_abort_xfer() implementation) -- those are real bugs too but
  * combining all three at once made an already-degraded physical test rig
- * (OAKTONE Oakboard Mini + a cascaded hub, after heavy hot-plug stress
+ * (a USB MIDI 2.0 keyboard + a cascaded hub, after heavy hot-plug stress
  * testing) hit two additional hard panics (Data Seq Error, Invalid speed)
  * that aren't yet understood, so this session is re-testing one change at a
  * time. See UUT_USB_HOST_UMP_TEST/README.md's known issues.
  *
  * The bug: on real hardware, a device that stops responding mid-control-
- * transfer (confirmed with an OAKTONE Oakboard Mini attached only through a
+ * transfer (confirmed with a USB MIDI 2.0 keyboard attached only through a
  * hub, in isolation, nothing else on the bus) produces a genuine SIE-
  * hardware USB_INTS_ERROR_RX_TIMEOUT_BITS interrupt -- the hardware's own
  * "device never responded" detection -- but the stock driver just cleared
@@ -72,7 +72,7 @@
  * SKETCH, NOT YET HARDWARE-TESTED (2026-08-30): software timeout for epx
  * control transfers, to catch a device that ACKs the SETUP stage but then
  * NAKs the data-stage IN indefinitely (confirmed via Beagle capture against
- * an OAKTONE Oakboard Mini behind a hub -- ~85,982 consecutive IN-NAKs, no
+ * a USB MIDI 2.0 keyboard behind a hub -- ~85,982 consecutive IN-NAKs, no
  * RX_TIMEOUT ever fired because RX_TIMEOUT is the SIE's "device went
  * silent" detection, a different condition from "device keeps NAKing").
  * Confirmed via ~/.pico-sdk's usb.h register definitions that RP2040 has NO
@@ -636,8 +636,6 @@ void hcd_device_close(uint8_t rhport, uint8_t dev_addr)
   pico_trace("hcd_device_close %d\n", dev_addr);
   (void) rhport;
 
-  if (dev_addr == 0) return;
-
   // AmeNote fix (re-added 2026-08-30): epx (ep_pool[0]) is the single
   // hardware control endpoint shared by EVERY device's control transfers
   // (see get_dev_ep(): endpoint number 0 always maps to &epx). The loop
@@ -650,6 +648,18 @@ void hcd_device_close(uint8_t rhport, uint8_t dev_addr)
   // rp2040_usb.c's "ep NN was already available" panic. Confirmed on
   // hardware: this fired for a hub device closed right after its own
   // Set Configuration timed out, on the very next dev0 attach.
+  //
+  // This runs BEFORE the dev_addr == 0 early return below (2026-09-15).
+  // Enumeration happens at address 0, and usbh.c closes that phase with an
+  // explicit hcd_device_close(rhport, 0) ("Close device 0", after Set
+  // Address). Stock upstream returns immediately for dev_addr 0 because the
+  // per-device endpoint loop has nothing to do there -- but epx very much
+  // does: it is the endpoint enumeration just finished using, and
+  // epx.dev_addr is 0 at that point, so this cleanup matches exactly. With
+  // the return first, a device that stalls or is unplugged mid-enumeration
+  // left USB_BUF_CTRL_AVAIL set on epx forever, and the next attach paniced
+  // with "ep 80 was already available". Confirmed on hardware (ProtoZOA,
+  // 2026-09-15) with a device that never completed enumeration.
   if (epx.dev_addr == dev_addr) {
     // AmeNote sketch: also cancel any pending NAK-timeout alarm for epx --
     // it's being reset out from under whatever transfer it was tracking,
@@ -659,6 +669,9 @@ void hcd_device_close(uint8_t rhport, uint8_t dev_addr)
     *epx.buffer_control = 0;
     hw_endpoint_reset_transfer(&epx);
   }
+
+  // Device 0 has no per-device endpoints; everything it owned was epx above.
+  if (dev_addr == 0) return;
 
   for (size_t i = 1; i < TU_ARRAY_SIZE(ep_pool); i++)
   {
@@ -844,6 +857,33 @@ bool hcd_setup_send(uint8_t rhport, uint8_t dev_addr, uint8_t const setup_packet
 
   // EPX should be inactive
   assert(!ep->active);
+
+  // AmeNote fix (2026-09-15): scrub any stale hardware state on epx before
+  // starting this control transfer. A SETUP is by definition the start of a
+  // new transfer, so anything still latched on epx here -- most importantly
+  // USB_BUF_CTRL_AVAIL in the buffer-control register -- belongs to a
+  // transfer that never completed, e.g. a device unplugged mid-control-
+  // transfer or one that stalled during enumeration. The SIE only clears
+  // AVAIL when it completes a transaction, so an unplug leaves it set
+  // forever.
+  //
+  // The assert above is the only thing that previously caught this, and it
+  // is compiled out under NDEBUG in this project's Release build, so the
+  // stale state passed through silently here and instead blew up at the
+  // data/status stage: hcd_edpt_xfer() -> hw_endpoint_xfer_start() ->
+  // rp2040_usb.c's _hw_endpoint_buffer_control_update32() sees AVAIL already
+  // set and calls panic("ep %02X was already available"). Observed on
+  // ProtoZOA as "*** PANIC *** ep 80 was already available" on every replug
+  // after a device failed to enumerate -- and it was ALSO what stopped the
+  // device enumerating in the first place, so this fix restores both.
+  //
+  // Clearing in hcd_device_close()/hcd_edpt_abort_xfer() is not sufficient:
+  // those only run for removal paths usbh.c actually reaches, and a device
+  // that never enumerated can leave epx dirty without either firing. Doing
+  // it here covers every route into a new control transfer.
+  _epx_xfer_timeout_cancel();
+  *ep->buffer_control = 0;
+  hw_endpoint_reset_transfer(ep);
 
   // EP0 out
   _hw_endpoint_init(ep, dev_addr, 0x00, ep->wMaxPacketSize, 0, 0);
